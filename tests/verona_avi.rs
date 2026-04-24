@@ -92,17 +92,15 @@ fn scan_avi(bytes: &[u8]) -> (u16, u16, u32, u16, Vec<Vec<u8>>) {
                 let fcc = &bytes[body_start..body_start + 4];
                 next_strf_is_audio = fcc == b"auds";
             }
-            b"strf" => {
-                if next_strf_is_audio {
-                    let b = &bytes[body_start..body_end];
-                    if b.len() >= 16 {
-                        format_tag = u16::from_le_bytes([b[0], b[1]]);
-                        channels = u16::from_le_bytes([b[2], b[3]]);
-                        samples_per_sec = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
-                        block_align = u16::from_le_bytes([b[12], b[13]]);
-                    }
-                    next_strf_is_audio = false;
+            b"strf" if next_strf_is_audio => {
+                let b = &bytes[body_start..body_end];
+                if b.len() >= 16 {
+                    format_tag = u16::from_le_bytes([b[0], b[1]]);
+                    channels = u16::from_le_bytes([b[2], b[3]]);
+                    samples_per_sec = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+                    block_align = u16::from_le_bytes([b[12], b[13]]);
                 }
+                next_strf_is_audio = false;
             }
             _ => {}
         }
@@ -167,7 +165,10 @@ fn verona_adpcm_ms_audio_track_decodes() {
         }
     }
 
-    assert!(total_samples > 10_000, "decoded only {total_samples} samples from verona.avi");
+    assert!(
+        total_samples > 10_000,
+        "decoded only {total_samples} samples from verona.avi"
+    );
     // Speech audio is rarely all zeroes — at least 50% of the samples
     // should be nonzero.
     assert!(

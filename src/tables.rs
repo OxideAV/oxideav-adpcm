@@ -42,9 +42,7 @@ pub const IMA_STEP_SIZE: [i16; 89] = [
 ];
 
 /// 16-entry index-adjustment table. Indexed by the 4-bit nibble.
-pub const IMA_INDEX_ADJUST: [i32; 16] = [
-    -1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8,
-];
+pub const IMA_INDEX_ADJUST: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
 
 // ---------------- Yamaha ADPCM ----------------
 //
