@@ -13,7 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use oxideav_adpcm::CODEC_ID_MS;
-use oxideav_codec::CodecRegistry;
+use oxideav_core::CodecRegistry;
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
 
 fn fixture_path() -> PathBuf {

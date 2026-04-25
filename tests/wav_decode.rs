@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oxideav_adpcm::{ima_wav, ms, yamaha, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA};
-use oxideav_codec::CodecRegistry;
+use oxideav_core::CodecRegistry;
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
 
 fn fixtures_dir() -> PathBuf {

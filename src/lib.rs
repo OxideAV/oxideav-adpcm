@@ -16,7 +16,7 @@
 //! Call [`register`] from an aggregator crate (or from application code):
 //!
 //! ```no_run
-//! # use oxideav_codec::CodecRegistry;
+//! # use oxideav_core::CodecRegistry;
 //! let mut reg = CodecRegistry::new();
 //! oxideav_adpcm::register(&mut reg);
 //! ```
@@ -42,8 +42,8 @@ pub mod ms;
 pub mod tables;
 pub mod yamaha;
 
-use oxideav_codec::{CodecInfo, CodecRegistry};
 use oxideav_core::{CodecCapabilities, CodecId, CodecTag};
+use oxideav_core::{CodecInfo, CodecRegistry};
 
 /// Canonical codec id for Microsoft ADPCM.
 pub const CODEC_ID_MS: &str = "adpcm_ms";

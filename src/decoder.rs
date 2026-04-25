@@ -1,4 +1,4 @@
-//! `oxideav_codec::Decoder` impls — a small state machine that dispatches
+//! `oxideav_core::Decoder` impls — a small state machine that dispatches
 //! each incoming packet to the right variant.
 //!
 //! All variants share the same pattern: `send_packet` parses the block /
@@ -6,7 +6,7 @@
 //! `receive_frame` emits exactly one `AudioFrame` and drops the buffer.
 
 use crate::{ima_qt, ima_wav, ms, yamaha};
-use oxideav_codec::Decoder;
+use oxideav_core::Decoder;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
 };
