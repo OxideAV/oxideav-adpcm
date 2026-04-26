@@ -173,12 +173,8 @@ impl Decoder for AdpcmDecoder {
             };
         };
         Ok(Frame::Audio(AudioFrame {
-            format: SampleFormat::S16,
-            channels: self.channels,
-            sample_rate: self.sample_rate,
             samples: pf.samples,
             pts: pf.pts,
-            time_base: self.time_base,
             data: vec![pf.data],
         }))
     }
