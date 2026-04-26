@@ -7,9 +7,7 @@
 
 use crate::{ima_qt, ima_wav, ms, yamaha};
 use oxideav_core::Decoder;
-use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result, SampleFormat, TimeBase,
-};
+use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
 /// Which of the four variants this instance implements.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -61,14 +59,10 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         }
         Variant::Yamaha => {}
     }
-    let sample_rate = params.sample_rate.unwrap_or(8_000);
-    let time_base = TimeBase::new(1, sample_rate as i64);
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
         variant,
         channels,
-        sample_rate,
-        time_base,
         pending: None,
         yamaha_state: vec![yamaha::Channel::default(); channels as usize],
         eof: false,
@@ -85,8 +79,6 @@ pub struct AdpcmDecoder {
     codec_id: CodecId,
     variant: Variant,
     channels: u16,
-    sample_rate: u32,
-    time_base: TimeBase,
     pending: Option<PendingFrame>,
     // Yamaha carries state across packets; the other variants re-seed per
     // block.
