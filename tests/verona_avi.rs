@@ -133,7 +133,7 @@ fn verona_adpcm_ms_audio_track_decodes() {
     );
 
     let mut reg = CodecRegistry::new();
-    oxideav_adpcm::register(&mut reg);
+    oxideav_adpcm::register_codecs(&mut reg);
     let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_MS));
     params.sample_rate = Some(sample_rate);
     params.channels = Some(channels);

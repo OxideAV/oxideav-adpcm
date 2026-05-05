@@ -16,9 +16,9 @@
 //! Call [`register`] from an aggregator crate (or from application code):
 //!
 //! ```no_run
-//! # use oxideav_core::CodecRegistry;
-//! let mut reg = CodecRegistry::new();
-//! oxideav_adpcm::register(&mut reg);
+//! # use oxideav_core::RuntimeContext;
+//! let mut ctx = RuntimeContext::new();
+//! oxideav_adpcm::register(&mut ctx);
 //! ```
 //!
 //! Each codec id is also wired to its canonical WAVEFORMATEX tag so an
@@ -55,7 +55,7 @@ pub const CODEC_ID_IMA_QT: &str = "adpcm_ima_qt";
 pub const CODEC_ID_YAMAHA: &str = "adpcm_yamaha";
 
 /// Register every ADPCM variant with `reg`. Decode-only.
-pub fn register(reg: &mut CodecRegistry) {
+pub fn register_codecs(reg: &mut CodecRegistry) {
     // adpcm_ms — WAVE_FORMAT_ADPCM = 0x0002.
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_MS))
@@ -102,6 +102,13 @@ pub fn register(reg: &mut CodecRegistry) {
     );
 }
 
+/// Unified registration entry point — installs every ADPCM variant
+/// into the codec sub-registry of the supplied
+/// [`oxideav_core::RuntimeContext`].
+pub fn register(ctx: &mut oxideav_core::RuntimeContext) {
+    register_codecs(&mut ctx.codecs);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,7 +117,7 @@ mod tests {
     #[test]
     fn registers_all_four_decoders() {
         let mut reg = CodecRegistry::new();
-        register(&mut reg);
+        register_codecs(&mut reg);
         for id in [
             CODEC_ID_MS,
             CODEC_ID_IMA_WAV,
@@ -127,7 +134,7 @@ mod tests {
     #[test]
     fn builds_decoder_with_params() {
         let mut reg = CodecRegistry::new();
-        register(&mut reg);
+        register_codecs(&mut reg);
         for id in [
             CODEC_ID_MS,
             CODEC_ID_IMA_WAV,
@@ -139,6 +146,23 @@ mod tests {
             p.channels = Some(1);
             reg.make_decoder(&p)
                 .unwrap_or_else(|e| panic!("make_decoder for {id}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn register_via_runtime_context_installs_codec_factory() {
+        let mut ctx = oxideav_core::RuntimeContext::new();
+        register(&mut ctx);
+        for id in [
+            CODEC_ID_MS,
+            CODEC_ID_IMA_WAV,
+            CODEC_ID_IMA_QT,
+            CODEC_ID_YAMAHA,
+        ] {
+            assert!(
+                ctx.codecs.has_decoder(&CodecId::new(id)),
+                "decoder factory not installed via RuntimeContext for {id}"
+            );
         }
     }
 }

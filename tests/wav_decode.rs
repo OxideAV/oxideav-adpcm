@@ -174,7 +174,7 @@ fn decode_wav_with_our_decoder(codec_id: &str, wav: &[u8]) -> Vec<i16> {
     params.sample_rate = Some(sample_rate);
     params.channels = Some(channels);
     let mut reg = CodecRegistry::new();
-    oxideav_adpcm::register(&mut reg);
+    oxideav_adpcm::register_codecs(&mut reg);
     let mut dec = reg
         .make_decoder(&params)
         .expect("our decoder supports the parsed format");
