@@ -137,7 +137,7 @@ fn verona_adpcm_ms_audio_track_decodes() {
     let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_MS));
     params.sample_rate = Some(sample_rate);
     params.channels = Some(channels);
-    let mut dec = reg.make_decoder(&params).expect("build adpcm_ms decoder");
+    let mut dec = reg.first_decoder(&params).expect("build adpcm_ms decoder");
 
     let tb = TimeBase::new(1, sample_rate as i64);
     let mut total_samples = 0usize;

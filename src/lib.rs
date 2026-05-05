@@ -146,7 +146,7 @@ mod tests {
             let mut p = CodecParameters::audio(CodecId::new(id));
             p.sample_rate = Some(22_050);
             p.channels = Some(1);
-            reg.make_decoder(&p)
+            reg.first_decoder(&p)
                 .unwrap_or_else(|e| panic!("make_decoder for {id}: {e:?}"));
         }
     }
