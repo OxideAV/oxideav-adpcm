@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **MS-ADPCM encoder** (`encoder::MsEncoder`) and **IMA-ADPCM-WAV
+  encoder** (`encoder::ImaWavEncoder`) implementing
+  `oxideav_core::Encoder`. Both factories register through
+  `register_codecs` so `CodecRegistry::first_encoder(&params)` works
+  out of the box.
+- Encoders use the decoder-loop nibble-search algorithm derived from
+  the existing decoder recurrence (no third-party encoder source
+  consulted). Default per-channel block size is 256 bytes; override
+  via the per-variant `set_block_size` method before the first
+  `send_frame` call.
+- `tests/encode_round_trip.rs` — end-to-end PCM → encode → decode →
+  PCM round trips through the registry for MS mono/stereo and
+  IMA-WAV mono/stereo; bounded RMS error against the source.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.3...v0.0.4) - 2026-05-06
 
 ### Other

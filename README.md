@@ -17,7 +17,29 @@ are NOT re-implemented here.
 
 ## Status
 
-Decode-only. Encoders are out of scope for this crate.
+Decoders for all four supported codec ids. Encoders for the two
+block-oriented WAV variants:
+
+| Codec id          | Decoder | Encoder |
+|-------------------|---------|---------|
+| `adpcm_ms`        | yes     | yes     |
+| `adpcm_ima_wav`   | yes     | yes     |
+| `adpcm_ima_qt`    | yes     | no      |
+| `adpcm_yamaha`    | yes     | no      |
+
+The encoders use the textbook decoder-loop search: for each input PCM
+sample they evaluate all 16 candidate nibbles by simulating the
+decoder's recurrence forward, then emit the nibble whose reconstructed
+output minimises absolute error against the target. The algorithm is
+derived from the decoder recurrence already in this crate — no
+third-party encoder source was consulted. Round-trip RMS error for a
+20 ms 440 Hz sine at 22.05 kHz is well under 1000 LSB for both
+encoders.
+
+Default block size is 256 bytes per channel for both encoders (matches
+the default ffmpeg emits at 22050 Hz mono). Override via
+`MsEncoder::set_block_size` / `ImaWavEncoder::set_block_size` before
+the first `send_frame` call.
 
 ## Specs followed
 

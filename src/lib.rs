@@ -36,6 +36,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod decoder;
+pub mod encoder;
 pub mod ima_qt;
 pub mod ima_wav;
 pub mod ms;
@@ -54,7 +55,9 @@ pub const CODEC_ID_IMA_QT: &str = "adpcm_ima_qt";
 /// Canonical codec id for Yamaha ADPCM.
 pub const CODEC_ID_YAMAHA: &str = "adpcm_yamaha";
 
-/// Register every ADPCM variant with `reg`. Decode-only.
+/// Register every ADPCM variant with `reg`. Decoders for all four
+/// variants; encoders currently only for MS-ADPCM and IMA-ADPCM-WAV
+/// (the two block-oriented WAV variants).
 pub fn register_codecs(reg: &mut CodecRegistry) {
     // adpcm_ms — WAVE_FORMAT_ADPCM = 0x0002.
     reg.register(
@@ -65,6 +68,7 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
                     .with_intra_only(true),
             )
             .decoder(decoder::make_decoder)
+            .encoder(encoder::make_encoder)
             .tag(CodecTag::wave_format(0x0002)),
     );
     // adpcm_ima_wav — WAVE_FORMAT_DVI_ADPCM = 0x0011.
@@ -76,6 +80,7 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
                     .with_intra_only(true),
             )
             .decoder(decoder::make_decoder)
+            .encoder(encoder::make_encoder)
             .tag(CodecTag::wave_format(0x0011)),
     );
     // adpcm_ima_qt — QuickTime fourcc `ima4`.
