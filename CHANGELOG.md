@@ -22,6 +22,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tests/encode_round_trip.rs` — end-to-end PCM → encode → decode →
   PCM round trips through the registry for MS mono/stereo and
   IMA-WAV mono/stereo; bounded RMS error against the source.
+- **IMA-ADPCM-QT encoder** (`encoder::ImaQtEncoder`,
+  `encoder::ima_qt_encode_block`) for the Apple QuickTime `ima4`
+  variant. Fixed 34-byte-per-channel blocks per spec (no
+  `set_block_size`); block-level channel interleave preserved on
+  output. The encoder picks its initial step-index seed from the
+  mean |Δ| of the first 8 samples to compress the leading-edge
+  transient that block-by-block re-seeding otherwise creates. Round
+  trips through `ima_qt::decode_block` plus registry-level mono/stereo
+  round trips through `tests/encode_round_trip.rs`. Mono/stereo RMS
+  on a 0.1 s 440 Hz sine at 22.05 kHz stays under 1500 LSB.
 
 ## [0.0.4](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.3...v0.0.4) - 2026-05-06
 

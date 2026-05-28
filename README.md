@@ -17,14 +17,14 @@ are NOT re-implemented here.
 
 ## Status
 
-Decoders for all four supported codec ids. Encoders for the two
-block-oriented WAV variants:
+Decoders for all four supported codec ids. Encoders for the three
+block-oriented variants (MS, IMA-WAV, IMA-QT):
 
 | Codec id          | Decoder | Encoder |
 |-------------------|---------|---------|
 | `adpcm_ms`        | yes     | yes     |
 | `adpcm_ima_wav`   | yes     | yes     |
-| `adpcm_ima_qt`    | yes     | no      |
+| `adpcm_ima_qt`    | yes     | yes     |
 | `adpcm_yamaha`    | yes     | no      |
 
 The encoders use the textbook decoder-loop search: for each input PCM
@@ -33,13 +33,18 @@ decoder's recurrence forward, then emit the nibble whose reconstructed
 output minimises absolute error against the target. The algorithm is
 derived from the decoder recurrence already in this crate — no
 third-party encoder source was consulted. Round-trip RMS error for a
-20 ms 440 Hz sine at 22.05 kHz is well under 1000 LSB for both
+20 ms 440 Hz sine at 22.05 kHz stays below 1500 LSB across all three
 encoders.
 
-Default block size is 256 bytes per channel for both encoders (matches
-the default ffmpeg emits at 22050 Hz mono). Override via
-`MsEncoder::set_block_size` / `ImaWavEncoder::set_block_size` before
-the first `send_frame` call.
+Default block size is 256 bytes per channel for the MS and IMA-WAV
+encoders (matches the default ffmpeg emits at 22050 Hz mono); override
+via `MsEncoder::set_block_size` / `ImaWavEncoder::set_block_size`
+before the first `send_frame` call. The IMA-QT encoder uses the
+spec-mandated 34-byte-per-channel block — there is no `set_block_size`
+because the on-wire layout is fixed. To minimise the high-amplitude
+leading-edge transient inherent to per-block re-seeding, the IMA-QT
+encoder picks the initial step index from the mean |Δ| of the first
+samples in each block (rather than always seeding at 0).
 
 ## Specs followed
 

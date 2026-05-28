@@ -9,7 +9,7 @@
 //! a stream our own decoder reconstructs with bounded RMS error against
 //! the source.
 
-use oxideav_adpcm::{register_codecs, CODEC_ID_IMA_WAV, CODEC_ID_MS};
+use oxideav_adpcm::{register_codecs, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS};
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
 fn sine_pcm(n: usize, hz: f64, sample_rate: f64, amp: f64) -> Vec<i16> {
@@ -127,4 +127,21 @@ fn ima_wav_stereo_round_trip_via_registry() {
     assert!(decoded.len() >= pcm.len());
     let rms = rms_error(&decoded, &pcm);
     assert!(rms < 1500.0, "IMA-WAV stereo registry round-trip RMS {rms}");
+}
+
+#[test]
+fn ima_qt_mono_round_trip_via_registry() {
+    // QT uses 64-sample blocks; 2048 samples = 32 blocks.
+    let (pcm, decoded) = round_trip(CODEC_ID_IMA_QT, 1, 2048, 22050);
+    assert!(decoded.len() >= pcm.len());
+    let rms = rms_error(&decoded, &pcm);
+    assert!(rms < 1500.0, "IMA-QT mono registry round-trip RMS {rms}");
+}
+
+#[test]
+fn ima_qt_stereo_round_trip_via_registry() {
+    let (pcm, decoded) = round_trip(CODEC_ID_IMA_QT, 2, 2048, 22050);
+    assert!(decoded.len() >= pcm.len());
+    let rms = rms_error(&decoded, &pcm);
+    assert!(rms < 1500.0, "IMA-QT stereo registry round-trip RMS {rms}");
 }

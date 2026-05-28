@@ -56,8 +56,7 @@ pub const CODEC_ID_IMA_QT: &str = "adpcm_ima_qt";
 pub const CODEC_ID_YAMAHA: &str = "adpcm_yamaha";
 
 /// Register every ADPCM variant with `reg`. Decoders for all four
-/// variants; encoders currently only for MS-ADPCM and IMA-ADPCM-WAV
-/// (the two block-oriented WAV variants).
+/// variants; encoders for MS-ADPCM, IMA-ADPCM-WAV, and IMA-ADPCM-QT.
 pub fn register_codecs(reg: &mut CodecRegistry) {
     // adpcm_ms — WAVE_FORMAT_ADPCM = 0x0002.
     reg.register(
@@ -92,6 +91,7 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
                     .with_intra_only(true),
             )
             .decoder(decoder::make_decoder)
+            .encoder(encoder::make_encoder)
             .tag(CodecTag::fourcc(b"ima4")),
     );
     // adpcm_yamaha — WAVE_FORMAT_YAMAHA_ADPCM = 0x0020.

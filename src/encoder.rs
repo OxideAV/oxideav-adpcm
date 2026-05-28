@@ -10,7 +10,7 @@
 //! source — the algorithm is fully derived from the decoder recurrence
 //! in [`crate::ms`] / [`crate::ima_wav`].
 //!
-//! Two variants currently have encoders here:
+//! Three variants currently have encoders here:
 //!
 //! - **MS-ADPCM** (`adpcm_ms`, WAVEFORMATEX tag `0x0002`) — block size
 //!   defaults to 256 bytes per channel; the first 7 bytes per channel
@@ -23,6 +23,14 @@
 //!   `0x0011`) — block size defaults to 256 bytes per channel; the
 //!   first 4 bytes per channel are the header, the remainder is the
 //!   per-channel 4-byte-group nibble stream.
+//!
+//! - **Apple QuickTime IMA ADPCM** (`adpcm_ima_qt`, QuickTime fourcc
+//!   `ima4`) — fixed 34-byte block per channel (cannot be changed),
+//!   block-level channel interleave: a stereo packet of 68 bytes is
+//!   one ch-0 block followed by one ch-1 block. The 2-byte big-endian
+//!   preamble carries a 9-bit signed predictor seed (low 7 bits zero)
+//!   plus the initial step index. Each block produces exactly 64
+//!   samples per channel.
 //!
 //! Default block sizes can be overridden via the `block_size` field on
 //! the encoder before the first call to `send_frame`. The default of
@@ -550,6 +558,202 @@ impl Encoder for ImaWavEncoder {
 }
 
 // ---------------------------------------------------------------------------
+// IMA-ADPCM-QT (Apple QuickTime `ima4`) encoder
+// ---------------------------------------------------------------------------
+
+/// Fixed QuickTime IMA block size in bytes per channel. The QT spec hard-codes
+/// this — unlike the WAV variant, it is not a parameter the encoder can vary.
+pub const QT_BLOCK_BYTES_PER_CHANNEL: usize = 34;
+
+/// Samples produced per channel per QT block (32 body bytes × 2 nibbles).
+pub const QT_SAMPLES_PER_BLOCK: usize = 64;
+
+/// Encode one QuickTime IMA ADPCM block per channel.
+///
+/// `samples` carries exactly `QT_SAMPLES_PER_BLOCK * channels` interleaved i16
+/// samples and the returned buffer is `34 * channels` bytes long, laid out
+/// per the QT spec (ch-0 block then ch-1 block — block-level interleave).
+///
+/// The first sample of each channel becomes the predictor seed. The QT spec
+/// stores only the top 9 bits of that seed (low 7 bits are zero) — so the
+/// reconstructed first decoded sample will differ from the input by up to
+/// 64 LSB. This is inherent to the QT block format and not a property of the
+/// search loop.
+pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> {
+    if !(1..=2).contains(&channels) {
+        return Err(Error::unsupported(format!(
+            "adpcm_ima_qt encoder: channel count {channels} not supported (1 or 2)"
+        )));
+    }
+    let expected = QT_SAMPLES_PER_BLOCK * channels;
+    if samples.len() != expected {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_qt encoder: got {} samples, expected {expected} ({QT_SAMPLES_PER_BLOCK} per channel × {channels})",
+            samples.len()
+        )));
+    }
+
+    let mut out = vec![0u8; QT_BLOCK_BYTES_PER_CHANNEL * channels];
+    for ch in 0..channels {
+        let block_off = ch * QT_BLOCK_BYTES_PER_CHANNEL;
+        // Seed predictor from the first sample, quantised to the top 9 bits
+        // exactly as the decoder reads it (low 7 bits cleared via `& !0x7F`).
+        let seed_full = samples[ch] as i32;
+        let predictor_seed = seed_full & !0x7F;
+
+        // Re-reading `ima_qt::decode_block`: the decoder writes EXACTLY
+        // 64 output samples (2 per body byte) and does NOT emit the seed
+        // predictor as sample 0. So our 64-sample input maps 1:1 to the
+        // 64 produced nibbles. The first sample of the input controls
+        // the predictor's initial state but is otherwise discarded.
+        //
+        // The step-index seed strongly affects reconstruction quality:
+        // with step_index=0 (step=7) the predictor can only chase
+        // ~1-LSB deltas on the first few nibbles, which means a
+        // high-amplitude bandlimited signal incurs a large transient
+        // error. The IMA index adapts upward at +8/+6/+4/+2 per nibble
+        // so it takes a few nibbles to "catch up." A heuristic seed
+        // based on the mean |Δ| of the first 8 samples works much
+        // better than a fixed 0.
+        let mean_delta = {
+            let mut acc: i64 = 0;
+            let mut n: i64 = 0;
+            for i in 0..7 {
+                let s0 = samples[i * channels + ch] as i32;
+                let s1 = samples[(i + 1) * channels + ch] as i32;
+                acc += (s1 - s0).unsigned_abs() as i64;
+                n += 1;
+            }
+            if n == 0 {
+                0
+            } else {
+                (acc / n) as i32
+            }
+        };
+        // For a magnitude-4 nibble (lo bit only) the decoder produces
+        // diff = step/8 + step/4 = 3*step/8 ≈ 0.375 * step. So target
+        // step ≈ mean_delta / 0.375 ≈ mean_delta * 8 / 3. Find the
+        // table index whose step is closest.
+        let target_step = (mean_delta as i64 * 8 / 3).max(7) as i32;
+        let mut step_index: i32 = 0;
+        for (i, &s) in IMA_STEP_SIZE.iter().enumerate() {
+            if s as i32 >= target_step {
+                step_index = i as i32;
+                break;
+            }
+            step_index = (IMA_STEP_SIZE.len() - 1) as i32;
+        }
+        step_index = step_index.clamp(0, 88);
+
+        // Encode the preamble: top 9 bits of predictor + 7-bit step index.
+        // The decoder reads `preamble as i16 as i32 & !0x7F` for the predictor
+        // and `preamble & 0x7F` for the step index, so we just OR them.
+        let preamble: u16 = (predictor_seed as u16 & 0xFF80) | (step_index as u16 & 0x7F);
+        out[block_off] = (preamble >> 8) as u8;
+        out[block_off + 1] = (preamble & 0xFF) as u8;
+
+        let mut st = ImaState {
+            predictor: predictor_seed,
+            step_index,
+        };
+        for i in 0..32 {
+            // Per the QT spec the LOW nibble of body[i] is decoded first,
+            // then the HIGH nibble.
+            let t_lo = samples[(i * 2) * channels + ch] as i32;
+            let (n_lo, st_after_lo) = ima_best_nibble(&st, t_lo);
+            st = st_after_lo;
+            let t_hi = samples[(i * 2 + 1) * channels + ch] as i32;
+            let (n_hi, st_after_hi) = ima_best_nibble(&st, t_hi);
+            st = st_after_hi;
+            out[block_off + 2 + i] = (n_hi << 4) | n_lo;
+        }
+    }
+    Ok(out)
+}
+
+/// IMA-ADPCM-QT encoder (Apple `ima4`).
+///
+/// QT blocks are fixed-size — there is no `set_block_size` method because
+/// the on-wire layout mandates 34 bytes per channel.
+pub struct ImaQtEncoder {
+    output_params: CodecParameters,
+    channels: usize,
+    pcm: Vec<i16>,
+    pending: VecDeque<Packet>,
+    samples_emitted: i64,
+    flushed: bool,
+}
+
+impl ImaQtEncoder {
+    fn drain_blocks(&mut self, allow_partial_final: bool) -> Result<()> {
+        let n_per_block = QT_SAMPLES_PER_BLOCK;
+        let per_block_samples_interleaved = n_per_block * self.channels;
+        let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(1) as i64);
+        while self.pcm.len() >= per_block_samples_interleaved {
+            let take: Vec<i16> = self.pcm.drain(..per_block_samples_interleaved).collect();
+            let bytes = ima_qt_encode_block(&take, self.channels)?;
+            let pts = self.samples_emitted;
+            self.samples_emitted += n_per_block as i64;
+            self.pending
+                .push_back(Packet::new(0, tb, bytes).with_pts(pts));
+        }
+        if allow_partial_final && !self.pcm.is_empty() {
+            let need = per_block_samples_interleaved - self.pcm.len();
+            let last_sample_index = self.pcm.len() / self.channels;
+            for _ in 0..(need / self.channels) {
+                for ch in 0..self.channels {
+                    let idx = last_sample_index.saturating_sub(1) * self.channels + ch;
+                    let s = if self.pcm.is_empty() {
+                        0
+                    } else {
+                        self.pcm[idx]
+                    };
+                    self.pcm.push(s);
+                }
+            }
+            debug_assert_eq!(self.pcm.len(), per_block_samples_interleaved);
+            let take: Vec<i16> = self.pcm.drain(..).collect();
+            let bytes = ima_qt_encode_block(&take, self.channels)?;
+            let pts = self.samples_emitted;
+            self.samples_emitted += n_per_block as i64;
+            self.pending
+                .push_back(Packet::new(0, tb, bytes).with_pts(pts));
+        }
+        Ok(())
+    }
+}
+
+impl Encoder for ImaQtEncoder {
+    fn codec_id(&self) -> &CodecId {
+        &self.output_params.codec_id
+    }
+    fn output_params(&self) -> &CodecParameters {
+        &self.output_params
+    }
+    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        let af = match frame {
+            Frame::Audio(a) => a,
+            _ => return Err(Error::invalid("adpcm_ima_qt encoder: expected audio frame")),
+        };
+        push_audio_frame_pcm(&mut self.pcm, af, self.channels)?;
+        self.drain_blocks(false)
+    }
+    fn receive_packet(&mut self) -> Result<Packet> {
+        if let Some(p) = self.pending.pop_front() {
+            return Ok(p);
+        }
+        Err(Error::NeedMore)
+    }
+    fn flush(&mut self) -> Result<()> {
+        if !self.flushed {
+            self.flushed = true;
+            self.drain_blocks(true)?;
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers + factories
 // ---------------------------------------------------------------------------
 
@@ -613,6 +817,21 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 output_params: params.clone(),
                 channels: channels as usize,
                 block_size: DEFAULT_BLOCK_SIZE,
+                pcm: Vec::new(),
+                pending: VecDeque::new(),
+                samples_emitted: 0,
+                flushed: false,
+            }))
+        }
+        crate::CODEC_ID_IMA_QT => {
+            if channels > 2 {
+                return Err(Error::unsupported(format!(
+                    "adpcm_ima_qt encoder: channels {channels} > 2 not supported"
+                )));
+            }
+            Ok(Box::new(ImaQtEncoder {
+                output_params: params.clone(),
+                channels: channels as usize,
                 pcm: Vec::new(),
                 pending: VecDeque::new(),
                 samples_emitted: 0,
@@ -813,5 +1032,139 @@ mod tests {
         let p = CodecParameters::audio(CodecId::new("adpcm_yamaha"));
         let r = make_encoder(&p);
         assert!(r.is_err());
+    }
+
+    // ---------------- IMA-QT encoder tests ----------------
+
+    #[test]
+    fn ima_qt_mono_round_trip_sine_low_error() {
+        // One QT block per channel = 64 samples. Encode 8 blocks of a
+        // 440Hz sine at 22.05 kHz mono.
+        let n_blocks = 8;
+        let pcm = sine_pcm(QT_SAMPLES_PER_BLOCK * n_blocks, 440.0, 22050.0, 16000.0);
+        let mut decoded = Vec::new();
+        for chunk in pcm.chunks(QT_SAMPLES_PER_BLOCK) {
+            let blk = ima_qt_encode_block(chunk, 1).unwrap();
+            assert_eq!(blk.len(), QT_BLOCK_BYTES_PER_CHANNEL);
+            let d = crate::ima_qt::decode_block(&blk, 1).unwrap();
+            assert_eq!(d.len(), QT_SAMPLES_PER_BLOCK);
+            decoded.extend_from_slice(&d);
+        }
+        let rms = rms_error(&decoded, &pcm);
+        // 4-bit predictor on a 16k-amplitude sine — same headroom as the
+        // other IMA variant. The QT 9-bit-seed quantisation also adds
+        // ~64 LSB once per block; still comfortably under 1500 RMS.
+        assert!(
+            rms < 1500.0,
+            "IMA-QT mono round-trip RMS {rms} exceeds 1500"
+        );
+    }
+
+    #[test]
+    fn ima_qt_stereo_round_trip_low_error() {
+        let n_blocks = 6;
+        let n = QT_SAMPLES_PER_BLOCK * n_blocks;
+        let l = sine_pcm(n, 440.0, 22050.0, 8000.0);
+        let r = sine_pcm(n, 660.0, 22050.0, 8000.0);
+        let mut pcm = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            pcm.push(l[i]);
+            pcm.push(r[i]);
+        }
+        let mut decoded_l = Vec::new();
+        let mut decoded_r = Vec::new();
+        let per_block_interleaved = QT_SAMPLES_PER_BLOCK * 2;
+        for chunk in pcm.chunks(per_block_interleaved) {
+            let blk = ima_qt_encode_block(chunk, 2).unwrap();
+            assert_eq!(blk.len(), QT_BLOCK_BYTES_PER_CHANNEL * 2);
+            let d = crate::ima_qt::decode_block(&blk, 2).unwrap();
+            assert_eq!(d.len(), per_block_interleaved);
+            for i in 0..QT_SAMPLES_PER_BLOCK {
+                decoded_l.push(d[i * 2]);
+                decoded_r.push(d[i * 2 + 1]);
+            }
+        }
+        let rms_l = rms_error(&decoded_l, &l);
+        let rms_r = rms_error(&decoded_r, &r);
+        assert!(rms_l < 1500.0, "IMA-QT stereo L RMS {rms_l}");
+        assert!(rms_r < 1500.0, "IMA-QT stereo R RMS {rms_r}");
+    }
+
+    #[test]
+    fn ima_qt_encode_rejects_size_mismatch() {
+        // Mono needs exactly 64 samples.
+        let pcm = vec![0i16; 63];
+        assert!(ima_qt_encode_block(&pcm, 1).is_err());
+        let pcm = vec![0i16; 64];
+        // 64 mono samples is valid.
+        assert!(ima_qt_encode_block(&pcm, 1).is_ok());
+        // Stereo needs exactly 128 samples (64 per channel).
+        let pcm = vec![0i16; 127];
+        assert!(ima_qt_encode_block(&pcm, 2).is_err());
+    }
+
+    #[test]
+    fn ima_qt_encode_rejects_unsupported_channel_count() {
+        let pcm = vec![0i16; QT_SAMPLES_PER_BLOCK * 3];
+        assert!(ima_qt_encode_block(&pcm, 3).is_err());
+        assert!(ima_qt_encode_block(&[], 0).is_err());
+    }
+
+    #[test]
+    fn ima_qt_factory_builds_via_make_encoder() {
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_IMA_QT));
+        p.sample_rate = Some(22050);
+        p.channels = Some(1);
+        let _enc = make_encoder(&p).expect("IMA-QT encoder factory");
+    }
+
+    #[test]
+    fn ima_qt_encoder_emits_one_packet_per_block() {
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_IMA_QT));
+        p.sample_rate = Some(22050);
+        p.channels = Some(1);
+        let mut enc = make_encoder(&p).unwrap();
+        let pcm = sine_pcm(QT_SAMPLES_PER_BLOCK * 2, 440.0, 22050.0, 16000.0);
+        let pcm_bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let af = AudioFrame {
+            samples: (QT_SAMPLES_PER_BLOCK * 2) as u32,
+            pts: Some(0),
+            data: vec![pcm_bytes],
+        };
+        enc.send_frame(&Frame::Audio(af)).unwrap();
+        let p0 = enc.receive_packet().unwrap();
+        let p1 = enc.receive_packet().unwrap();
+        assert_eq!(p0.data.len(), QT_BLOCK_BYTES_PER_CHANNEL);
+        assert_eq!(p1.data.len(), QT_BLOCK_BYTES_PER_CHANNEL);
+        assert!(matches!(enc.receive_packet(), Err(Error::NeedMore)));
+    }
+
+    #[test]
+    fn ima_qt_seed_predictor_is_top_9_bits() {
+        // Constant 12345 = 0x3039 → top 9 bits cleared low-7 = 0x3000 = 12288.
+        // mean_delta = 0 → step_index seed = 0.
+        let pcm = vec![12345i16; QT_SAMPLES_PER_BLOCK];
+        let blk = ima_qt_encode_block(&pcm, 1).unwrap();
+        // First preamble byte = (12288 >> 8) & 0xFF | 0 (step index 0) = 0x30.
+        // Second preamble byte = 12288 as u8 | 0 = 0x00.
+        assert_eq!(blk[0], 0x30);
+        assert_eq!(blk[1], 0x00);
+    }
+
+    #[test]
+    fn ima_qt_seeds_step_index_from_local_delta() {
+        // A high-delta input should push step_index toward a larger value.
+        // A 200-LSB-per-sample ramp implies target_step ≈ 200 * 8/3 ≈ 533;
+        // first step >= 533 is index 47 (s=544).
+        let pcm: Vec<i16> = (0..QT_SAMPLES_PER_BLOCK as i32)
+            .map(|i| (i * 200) as i16)
+            .collect();
+        let blk = ima_qt_encode_block(&pcm, 1).unwrap();
+        let preamble = u16::from_be_bytes([blk[0], blk[1]]);
+        let step_index = (preamble & 0x7F) as usize;
+        assert!(
+            (40..=55).contains(&step_index),
+            "step_index seed {step_index} should be ~47 for a 200-LSB-per-sample ramp"
+        );
     }
 }
