@@ -1,12 +1,14 @@
 //! ADPCM audio decoder family for oxideav.
 //!
-//! Covers the four common WAV / AVI / QuickTime ADPCM flavours:
+//! Covers the five common WAV / AVI / QuickTime / VOX ADPCM flavours:
 //!
 //! - **`adpcm_ms`** — Microsoft ADPCM (WAVEFORMATEX tag `0x0002`).
 //! - **`adpcm_ima_wav`** — IMA/DVI ADPCM, WAV packaging (tag `0x0011`).
 //! - **`adpcm_ima_qt`** — IMA ADPCM, Apple QuickTime packaging (fourcc
 //!   `ima4`).
 //! - **`adpcm_yamaha`** — Yamaha Y8950/YM2608/AICA ADPCM (tag `0x0020`).
+//! - **`adpcm_dialogic`** — OKI / Dialogic ADPCM (`.vox`); headerless,
+//!   no canonical WAV tag (rate supplied out of band).
 //!
 //! G.722 / G.726 / G.729 are *not* handled here — they live in their own
 //! crates.
@@ -36,6 +38,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod decoder;
+pub mod dialogic;
 pub mod encoder;
 pub mod ima_qt;
 pub mod ima_wav;
@@ -54,6 +57,15 @@ pub const CODEC_ID_IMA_WAV: &str = "adpcm_ima_wav";
 pub const CODEC_ID_IMA_QT: &str = "adpcm_ima_qt";
 /// Canonical codec id for Yamaha ADPCM.
 pub const CODEC_ID_YAMAHA: &str = "adpcm_yamaha";
+/// Canonical codec id for OKI / Dialogic ADPCM (`.vox`).
+///
+/// MSB-first nibble unpack (Dialogic VOX / MSM6295 ordering); 16-bit
+/// PCM output ([`dialogic::Output::Wide16`]); 12-bit silicon predictor
+/// internally. LSB-first MSM6258 streams should be decoded with
+/// [`dialogic::decode_packet`] directly so the nibble order can be
+/// specified explicitly — the registry-resolved decoder commits to the
+/// canonical VOX layout.
+pub const CODEC_ID_DIALOGIC: &str = "adpcm_dialogic";
 
 /// Register every ADPCM variant with `reg`. Decoders for all four
 /// variants; encoders for MS-ADPCM, IMA-ADPCM-WAV, and IMA-ADPCM-QT.
@@ -105,6 +117,17 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .decoder(decoder::make_decoder)
             .tag(CodecTag::wave_format(0x0020)),
     );
+    // adpcm_dialogic — VOX (no canonical WAV tag; rate is out-of-band).
+    reg.register(
+        CodecInfo::new(CodecId::new(CODEC_ID_DIALOGIC))
+            .capabilities(
+                CodecCapabilities::audio("adpcm_dialogic_sw")
+                    .with_lossy(true)
+                    .with_intra_only(false),
+            )
+            .decoder(decoder::make_decoder)
+            .encoder(encoder::make_encoder),
+    );
 }
 
 /// Unified registration entry point — installs every ADPCM variant
@@ -122,7 +145,7 @@ mod tests {
     use oxideav_core::CodecParameters;
 
     #[test]
-    fn registers_all_four_decoders() {
+    fn registers_all_decoders() {
         let mut reg = CodecRegistry::new();
         register_codecs(&mut reg);
         for id in [
@@ -130,6 +153,7 @@ mod tests {
             CODEC_ID_IMA_WAV,
             CODEC_ID_IMA_QT,
             CODEC_ID_YAMAHA,
+            CODEC_ID_DIALOGIC,
         ] {
             assert!(
                 reg.has_decoder(&CodecId::new(id)),
@@ -147,6 +171,7 @@ mod tests {
             CODEC_ID_IMA_WAV,
             CODEC_ID_IMA_QT,
             CODEC_ID_YAMAHA,
+            CODEC_ID_DIALOGIC,
         ] {
             let mut p = CodecParameters::audio(CodecId::new(id));
             p.sample_rate = Some(22_050);
@@ -165,6 +190,7 @@ mod tests {
             CODEC_ID_IMA_WAV,
             CODEC_ID_IMA_QT,
             CODEC_ID_YAMAHA,
+            CODEC_ID_DIALOGIC,
         ] {
             assert!(
                 ctx.codecs.has_decoder(&CodecId::new(id)),

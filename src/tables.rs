@@ -81,6 +81,54 @@ pub const YAMAHA_STEP_MIN: i32 = 127;
 /// Maximum step value (Y8950 manual: Δ saturates at 24576).
 pub const YAMAHA_STEP_MAX: i32 = 24576;
 
+// ---------------- OKI / Dialogic ADPCM (VOX) ----------------
+//
+// Source: Dialogic Corporation, *Dialogic ADPCM Algorithm*, doc 00-1366-001
+// (1988). The 49-entry calculated-step-size table is Table 2 of the app
+// note; the 8-entry magnitude-indexed adjustment is the row-collapsed form
+// of Table 1 (the sign bit `B3` is ignored when looking up `M`, so codes
+// `0xxx` and `1xxx` with the same magnitude share a row).
+//
+// [`IMA_STEP_SIZE`] above shares the same `~1.1^n` step-size geometry
+// but starts 8 entries earlier (at value 7); the Dialogic Table 2
+// values 16..1552 correspond to `IMA_STEP_SIZE[8..57]`. The OKI variant
+// uses a different magnitude→adjust mapping (-1/-1/-1/-1/+2/+4/+6/+8
+// vs IMA's -1/-1/-1/-1/+2/+4/+6/+8 — same numerically) but a smaller
+// table and 12-bit clamping. We expose the OKI 49-entry table as its
+// own constant so callers can verify shape directly against the
+// Dialogic app note.
+
+/// 49-entry calculated step-size table (Dialogic app note Table 2).
+///
+/// Indexed by the running step pointer (Dialogic numbers them "entry 1..49";
+/// we 0-index here). After applying `OKI_INDEX_ADJUST` the pointer is
+/// clamped to `0..=48`.
+pub const OKI_STEP_SIZE: [i16; 49] = [
+    16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130,
+    143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552,
+];
+
+/// 8-entry magnitude-indexed step-pointer adjustment (Dialogic app note
+/// Table 1, row-collapsed: the sign bit is dropped, leaving the 3-bit
+/// magnitude 0..=7 as the index). Codes with magnitude < 4 shrink the
+/// step; codes with magnitude ≥ 4 grow it.
+pub const OKI_INDEX_ADJUST: [i32; 8] = [-1, -1, -1, -1, 2, 4, 6, 8];
+
+/// Minimum value of the running step pointer after `OKI_INDEX_ADJUST` is
+/// applied (Dialogic Table 2 entry numbering starts at 1; here 0).
+pub const OKI_STEP_INDEX_MIN: i32 = 0;
+/// Maximum value of the running step pointer (Dialogic Table 2 last entry
+/// — 1411 sits at index 47, the final entry 1552 at index 48).
+pub const OKI_STEP_INDEX_MAX: i32 = 48;
+
+/// Lower bound of the 12-bit signed reconstructed predictor `X`. OKI MSM
+/// silicon clamps the running reconstruction to a 12-bit signed range; the
+/// app-note pseudocode does not list a bound but the chips do.
+pub const OKI_PREDICTOR_MIN: i32 = -2048;
+/// Upper bound of the 12-bit signed reconstructed predictor `X`.
+pub const OKI_PREDICTOR_MAX: i32 = 2047;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +164,36 @@ mod tests {
         assert_eq!(YAMAHA_INDEX_SCALE.len(), 8);
         assert_eq!(YAMAHA_DIFF_LOOKUP[0], 1);
         assert_eq!(YAMAHA_DIFF_LOOKUP[7], 15);
+    }
+
+    #[test]
+    fn oki_tables_have_expected_shape() {
+        assert_eq!(OKI_STEP_SIZE.len(), 49);
+        assert_eq!(OKI_INDEX_ADJUST.len(), 8);
+        // First and last spec-listed entries from Dialogic app note Table 2.
+        assert_eq!(OKI_STEP_SIZE[0], 16);
+        assert_eq!(OKI_STEP_SIZE[47], 1411);
+        assert_eq!(OKI_STEP_SIZE[48], 1552);
+        // Index-adjust contract: four small mags shrink, four large mags grow.
+        assert_eq!(OKI_INDEX_ADJUST[0], -1);
+        assert_eq!(OKI_INDEX_ADJUST[3], -1);
+        assert_eq!(OKI_INDEX_ADJUST[4], 2);
+        assert_eq!(OKI_INDEX_ADJUST[7], 8);
+    }
+
+    #[test]
+    fn oki_step_size_is_ima_step_size_8_to_57() {
+        // Dialogic Table 2 (49 entries, starting at value 16) is the
+        // 8..57 slice of IMA's 89-entry table (which starts at 7, with
+        // 8 small-magnitude pre-roll entries). Confirms both
+        // transcriptions match the shared textbook step geometry.
+        for i in 0..49 {
+            assert_eq!(
+                OKI_STEP_SIZE[i] as i32,
+                IMA_STEP_SIZE[i + 8] as i32,
+                "OKI[{i}] vs IMA[{}]",
+                i + 8
+            );
+        }
     }
 }

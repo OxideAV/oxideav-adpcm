@@ -9,7 +9,9 @@
 //! a stream our own decoder reconstructs with bounded RMS error against
 //! the source.
 
-use oxideav_adpcm::{register_codecs, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS};
+use oxideav_adpcm::{
+    register_codecs, CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
+};
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
 fn sine_pcm(n: usize, hz: f64, sample_rate: f64, amp: f64) -> Vec<i16> {
@@ -144,4 +146,25 @@ fn ima_qt_stereo_round_trip_via_registry() {
     assert!(decoded.len() >= pcm.len());
     let rms = rms_error(&decoded, &pcm);
     assert!(rms < 1500.0, "IMA-QT stereo registry round-trip RMS {rms}");
+}
+
+#[test]
+fn dialogic_mono_round_trip_via_registry() {
+    // OKI / Dialogic VOX. 8 kHz mono (the typical Dialogic telephony
+    // rate). 12-bit silicon → 16-bit pipeline, so an i16 sine bounded
+    // at amplitude 12000 stays clear of the 16-bit ceiling and rounds
+    // cleanly through the encoder's `>> 4` narrowing step.
+    let (pcm, decoded) = round_trip(CODEC_ID_DIALOGIC, 1, 800, 8000);
+    // Stream encoder produces one byte per two samples (rounded up);
+    // the decoder reconstructs exactly that many samples back.
+    assert_eq!(decoded.len(), pcm.len());
+    let rms = rms_error(&decoded, &pcm);
+    // The OKI step table caps `ss` at 1552 (12-bit input); shifted to
+    // 16-bit that's 1552 << 4 = 24832 LSB. Quantisation can briefly
+    // mis-track during step ramp-up, so we allow up to ~6000 LSB RMS
+    // here — well above noise floor, well below source amplitude.
+    assert!(
+        rms < 6000.0,
+        "Dialogic VOX mono registry round-trip RMS {rms}"
+    );
 }

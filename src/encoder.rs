@@ -10,7 +10,7 @@
 //! source — the algorithm is fully derived from the decoder recurrence
 //! in [`crate::ms`] / [`crate::ima_wav`].
 //!
-//! Three variants currently have encoders here:
+//! Four variants currently have encoders here:
 //!
 //! - **MS-ADPCM** (`adpcm_ms`, WAVEFORMATEX tag `0x0002`) — block size
 //!   defaults to 256 bytes per channel; the first 7 bytes per channel
@@ -32,6 +32,14 @@
 //!   plus the initial step index. Each block produces exactly 64
 //!   samples per channel.
 //!
+//! - **OKI / Dialogic VOX ADPCM** (`adpcm_dialogic`) — stream-oriented,
+//!   no block framing. The encoder carries the 12-bit predictor + step
+//!   pointer across `send_frame` calls and emits one packet per call.
+//!   Closed-form (sign + greedy magnitude bits) quantiser per the
+//!   Dialogic app-note §3 pseudocode — not the decoder-loop search the
+//!   block-oriented encoders use, because the per-byte ratio (2 samples
+//!   per byte) is too tight for the 16-candidate sweep to matter.
+//!
 //! Default block sizes can be overridden via the `block_size` field on
 //! the encoder before the first call to `send_frame`. The default of
 //! 256 bytes per channel matches what ffmpeg's `-c:a adpcm_ms` /
@@ -39,6 +47,7 @@
 
 use std::collections::VecDeque;
 
+use crate::dialogic;
 use crate::tables::{
     IMA_INDEX_ADJUST, IMA_STEP_SIZE, MS_ADAPTATION, MS_ADAPT_COEFF1, MS_ADAPT_COEFF2,
 };
@@ -754,6 +763,74 @@ impl Encoder for ImaQtEncoder {
 }
 
 // ---------------------------------------------------------------------------
+// Dialogic / OKI VOX encoder
+// ---------------------------------------------------------------------------
+
+/// Stream-oriented OKI / Dialogic VOX encoder.
+///
+/// Unlike the WAV-block-oriented MS / IMA encoders, VOX is headerless and
+/// state-continuous across the entire stream. Each `send_frame` invocation
+/// quantises whatever PCM arrived, emits the corresponding bytes as a
+/// single packet, and carries the predictor / step-index state into the
+/// next call.
+///
+/// We use the [`dialogic::Output::Wide16`]-equivalent encode wrapper
+/// ([`dialogic::encode_packet_wide16`]) on input PCM, matching the
+/// register-resolved decoder's `Wide16` output. Mono only on the
+/// registry path — multi-channel VOX is not standardised (and Dialogic
+/// hardware was strictly mono).
+pub struct DialogicEncoder {
+    output_params: CodecParameters,
+    state: dialogic::Channel,
+    pending: VecDeque<Packet>,
+    samples_emitted: i64,
+}
+
+impl Encoder for DialogicEncoder {
+    fn codec_id(&self) -> &CodecId {
+        &self.output_params.codec_id
+    }
+    fn output_params(&self) -> &CodecParameters {
+        &self.output_params
+    }
+    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        let af = match frame {
+            Frame::Audio(a) => a,
+            _ => {
+                return Err(Error::invalid(
+                    "adpcm_dialogic encoder: expected audio frame",
+                ))
+            }
+        };
+        // Re-use the shared PCM unpacker but for a single channel.
+        let mut pcm: Vec<i16> = Vec::new();
+        push_audio_frame_pcm(&mut pcm, af, 1)?;
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        let n_samples = pcm.len() as i64;
+        let bytes =
+            dialogic::encode_packet_wide16(&pcm, &mut self.state, dialogic::NibbleOrder::HiFirst);
+        let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
+        let pts = self.samples_emitted;
+        self.samples_emitted += n_samples;
+        self.pending
+            .push_back(Packet::new(0, tb, bytes).with_pts(pts));
+        Ok(())
+    }
+    fn receive_packet(&mut self) -> Result<Packet> {
+        if let Some(p) = self.pending.pop_front() {
+            return Ok(p);
+        }
+        Err(Error::NeedMore)
+    }
+    fn flush(&mut self) -> Result<()> {
+        // Stream codec: nothing buffered after send_frame returns.
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers + factories
 // ---------------------------------------------------------------------------
 
@@ -836,6 +913,19 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 pending: VecDeque::new(),
                 samples_emitted: 0,
                 flushed: false,
+            }))
+        }
+        crate::CODEC_ID_DIALOGIC => {
+            if channels != 1 {
+                return Err(Error::unsupported(format!(
+                    "adpcm_dialogic encoder: only mono supported on the registry path, got {channels}"
+                )));
+            }
+            Ok(Box::new(DialogicEncoder {
+                output_params: params.clone(),
+                state: dialogic::Channel::default(),
+                pending: VecDeque::new(),
+                samples_emitted: 0,
             }))
         }
         other => Err(Error::unsupported(format!(

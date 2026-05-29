@@ -11,14 +11,15 @@ Code Modulation) audio formats found in WAV / AVI / QuickTime streams.
 | `adpcm_ima_wav`   | IMA / DVI ADPCM — WAV variant | WAV tag `0x0011`            |
 | `adpcm_ima_qt`    | IMA ADPCM — QuickTime variant | QuickTime / MOV (fourcc `ima4`) |
 | `adpcm_yamaha`    | Yamaha ADPCM (Y8950/YM2608)   | WAV tag `0x0020` / `AICA`   |
+| `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless; no WAV tag) |
 
 G.722 (WAV tag `0x0028`) and G.726/G.723.1/G.729 live in their own crates and
 are NOT re-implemented here.
 
 ## Status
 
-Decoders for all four supported codec ids. Encoders for the three
-block-oriented variants (MS, IMA-WAV, IMA-QT):
+Decoders for all five supported codec ids. Encoders for four (the three
+block-oriented WAV variants plus the stream-oriented Dialogic VOX):
 
 | Codec id          | Decoder | Encoder |
 |-------------------|---------|---------|
@@ -26,6 +27,7 @@ block-oriented variants (MS, IMA-WAV, IMA-QT):
 | `adpcm_ima_wav`   | yes     | yes     |
 | `adpcm_ima_qt`    | yes     | yes     |
 | `adpcm_yamaha`    | yes     | no      |
+| `adpcm_dialogic`  | yes     | yes     |
 
 The encoders use the textbook decoder-loop search: for each input PCM
 sample they evaluate all 16 candidate nibbles by simulating the
@@ -70,6 +72,18 @@ implementation:
   `X(n+1) = X(n) + sign(L4) * (L3 + L2/2 + L1/4 + 1/8) * Δn` update rule
   from Yamaha's public *Y8950 (MSX-AUDIO) Application Manual*, section I-4
   and Table I-2. See [Y8950 manual PDF](https://map.grauw.nl/resources/sound/yamaha_y8950.pdf).
+- **OKI / Dialogic VOX ADPCM** — 49-entry calculated step-size table
+  (Table 2) and 8-entry magnitude-indexed step-pointer adjustment (the
+  row-collapsed form of Table 1) from Dialogic Corporation's *Dialogic
+  ADPCM Algorithm* application note, doc 00-1366-001 (1988); the same
+  decoder/encoder pseudocode (§2–§3) is transcribed directly from the
+  app note. Reconstructed predictor is 12-bit signed (`-2048..=2047`);
+  the registry-resolved decoder shifts to a full-range i16 on output,
+  while the raw 12-bit value remains available via `dialogic::Output::Native12`.
+  Dialogic VOX is **headerless** — `.vox` files carry no sample rate;
+  callers supply it out of band (commonly 6 kHz or 8 kHz for telephony).
+  The MSM6258's LSB-first nibble order is reachable via the lower-level
+  `dialogic::decode_packet(.., NibbleOrder::LoFirst, ..)` API.
 
 The adaptation / step tables are normative constants (uncopyrightable facts);
 the implementation was written from these spec descriptions without reading

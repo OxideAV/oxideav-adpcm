@@ -5,17 +5,18 @@
 //! packet immediately and stores the decoded PCM in `pending`, then
 //! `receive_frame` emits exactly one `AudioFrame` and drops the buffer.
 
-use crate::{ima_qt, ima_wav, ms, yamaha};
+use crate::{dialogic, ima_qt, ima_wav, ms, yamaha};
 use oxideav_core::Decoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
-/// Which of the four variants this instance implements.
+/// Which of the supported variants this instance implements.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Variant {
     Ms,
     ImaWav,
     ImaQt,
     Yamaha,
+    Dialogic,
 }
 
 impl Variant {
@@ -25,6 +26,7 @@ impl Variant {
             crate::CODEC_ID_IMA_WAV => Some(Self::ImaWav),
             crate::CODEC_ID_IMA_QT => Some(Self::ImaQt),
             crate::CODEC_ID_YAMAHA => Some(Self::Yamaha),
+            crate::CODEC_ID_DIALOGIC => Some(Self::Dialogic),
             _ => None,
         }
     }
@@ -58,6 +60,9 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
             }
         }
         Variant::Yamaha => {}
+        Variant::Dialogic => {
+            dialogic::validate_channels(channels)?;
+        }
     }
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
@@ -65,6 +70,7 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         channels,
         pending: None,
         yamaha_state: vec![yamaha::Channel::default(); channels as usize],
+        dialogic_state: vec![dialogic::Channel::default(); channels as usize],
         eof: false,
     }))
 }
@@ -80,9 +86,12 @@ pub struct AdpcmDecoder {
     variant: Variant,
     channels: u16,
     pending: Option<PendingFrame>,
-    // Yamaha carries state across packets; the other variants re-seed per
-    // block.
+    // Yamaha carries state across packets; the other block-oriented
+    // variants re-seed per block.
     yamaha_state: Vec<yamaha::Channel>,
+    // Dialogic / OKI VOX is also stream-oriented (state persists across
+    // packets — no per-block resets).
+    dialogic_state: Vec<dialogic::Channel>,
     eof: bool,
 }
 
@@ -119,6 +128,12 @@ impl AdpcmDecoder {
                 out
             }
             Variant::Yamaha => yamaha::decode_packet(&pkt.data, &mut self.yamaha_state),
+            Variant::Dialogic => dialogic::decode_packet(
+                &pkt.data,
+                &mut self.dialogic_state,
+                dialogic::NibbleOrder::HiFirst,
+                dialogic::Output::Wide16,
+            ),
         };
 
         // Interleaved i16 → little-endian bytes.
@@ -179,10 +194,13 @@ impl Decoder for AdpcmDecoder {
     fn reset(&mut self) -> Result<()> {
         self.pending = None;
         self.eof = false;
-        // Re-seed per-channel Yamaha state. MS / IMA are memoryless per
-        // block so no further action needed.
+        // Re-seed per-channel Yamaha + Dialogic state. MS / IMA are
+        // memoryless per block so no further action needed.
         for st in &mut self.yamaha_state {
             *st = yamaha::Channel::default();
+        }
+        for st in &mut self.dialogic_state {
+            *st = dialogic::Channel::default();
         }
         Ok(())
     }

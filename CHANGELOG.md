@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OKI / Dialogic VOX ADPCM** decoder + encoder (`adpcm_dialogic`),
+  registered through `register_codecs`. Headerless byte-stream codec
+  used by Dialogic voice-processing hardware and the OKI MSM6258 /
+  MSM6295 silicon family (`.vox` files). Implementation transcribed
+  from Dialogic Corporation's *Dialogic ADPCM Algorithm* application
+  note (doc 00-1366-001, 1988): 49-entry calculated step-size table
+  (Table 2), 8-entry magnitude-indexed step-pointer adjustment (the
+  row-collapsed Table 1), and the §2–§3 decoder + encoder pseudocode.
+  The reconstructed predictor is signed 12-bit (`-2048..=2047`) inside
+  the codec and is shifted to the i16 range on output for the registry
+  path; the native 12-bit form is available via `dialogic::Output::Native12`.
+  MSB-first nibble unpack (Dialogic VOX / MSM6295) is the registry
+  default; LSB-first (MSM6258) is selectable on the `dialogic::decode_packet`
+  /`dialogic::encode_packet` lower-level API via the [`NibbleOrder`] enum.
+  Round-trip RMS error for a 0.1 s 440 Hz sine at 8 kHz stays under
+  6000 LSB (against a 12000-LSB-amplitude i16 source).
 - **MS-ADPCM encoder** (`encoder::MsEncoder`) and **IMA-ADPCM-WAV
   encoder** (`encoder::ImaWavEncoder`) implementing
   `oxideav_core::Encoder`. Both factories register through
