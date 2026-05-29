@@ -67,8 +67,9 @@ pub const CODEC_ID_YAMAHA: &str = "adpcm_yamaha";
 /// canonical VOX layout.
 pub const CODEC_ID_DIALOGIC: &str = "adpcm_dialogic";
 
-/// Register every ADPCM variant with `reg`. Decoders for all four
-/// variants; encoders for MS-ADPCM, IMA-ADPCM-WAV, and IMA-ADPCM-QT.
+/// Register every ADPCM variant with `reg`. Decoders for all five
+/// variants; encoders for MS-ADPCM, IMA-ADPCM-WAV, IMA-ADPCM-QT, and
+/// OKI/Dialogic VOX (Yamaha has no encoder yet).
 pub fn register_codecs(reg: &mut CodecRegistry) {
     // adpcm_ms — WAVE_FORMAT_ADPCM = 0x0002.
     reg.register(
