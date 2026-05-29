@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.4...v0.0.5) - 2026-05-29
+
+### Other
+
+- update register_codecs docstring to reflect 5 variants
+- add OKI/Dialogic VOX decoder + encoder (adpcm_dialogic)
+- IMA-ADPCM-QT (Apple ima4) encoder
+- MS-ADPCM and IMA-ADPCM-WAV encoders (decoder-loop search)
+
 ### Added
 
 - **OKI / Dialogic VOX ADPCM** decoder + encoder (`adpcm_dialogic`),
