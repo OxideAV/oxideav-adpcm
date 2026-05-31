@@ -11,6 +11,7 @@
 
 use oxideav_adpcm::{
     register_codecs, CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
+    CODEC_ID_YAMAHA,
 };
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
@@ -146,6 +147,25 @@ fn ima_qt_stereo_round_trip_via_registry() {
     assert!(decoded.len() >= pcm.len());
     let rms = rms_error(&decoded, &pcm);
     assert!(rms < 1500.0, "IMA-QT stereo registry round-trip RMS {rms}");
+}
+
+#[test]
+fn yamaha_mono_round_trip_via_registry() {
+    // Yamaha is stream-oriented (no per-block header). 8 kHz mono with
+    // a low-frequency sine — the Y8950's 127..24576 step range tracks
+    // a low-freq sine cleanly once the step settles.
+    let (pcm, decoded) = round_trip(CODEC_ID_YAMAHA, 1, 800, 8000);
+    assert_eq!(decoded.len(), pcm.len());
+    let rms = rms_error(&decoded, &pcm);
+    assert!(rms < 3000.0, "Yamaha mono registry round-trip RMS {rms}");
+}
+
+#[test]
+fn yamaha_stereo_round_trip_via_registry() {
+    let (pcm, decoded) = round_trip(CODEC_ID_YAMAHA, 2, 800, 8000);
+    assert_eq!(decoded.len(), pcm.len());
+    let rms = rms_error(&decoded, &pcm);
+    assert!(rms < 3000.0, "Yamaha stereo registry round-trip RMS {rms}");
 }
 
 #[test]

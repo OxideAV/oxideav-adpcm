@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Yamaha ADPCM encoder** (`encoder::YamahaEncoder`,
+  `yamaha::encode_sample`, `yamaha::encode_packet`) — closes the
+  last decoder-only variant in the crate. Closed-form quantiser
+  derived from the Y8950 manual §I-4 *analysis* recurrence: sign
+  bit from `dn = Xn − x̂n`, magnitude bits from the eight thresholds
+  `{0, 1/4, 1/2, 3/4, 1, 5/4, 3/2, 7/4}` of `|dn|/Δn` printed in
+  Table 5-1 (YM2608) and Table 1 (AICA FQ8005). State advances
+  through `yamaha::decode_nibble` so the encoder is bit-for-bit
+  equivalent to the decoder it ships with. Stream-oriented
+  (per-channel predictor + step carry across `send_frame` calls);
+  up to 8 channels, sample-interleaved input, low-nibble-first byte
+  packing per the WAV-tag-0x0020 convention. Round-trip RMS error
+  for a 50 ms 220 Hz sine at 8 kHz stays under 2000 LSB mono /
+  stereo, under 3000 LSB through the registry on a 100 ms sine.
+- `encoder::make_encoder` now serves `CODEC_ID_YAMAHA`; the codec's
+  `register_codecs` entry installs both decoder and encoder.
+- `tests/encode_round_trip.rs` — added Yamaha mono + stereo
+  registry round-trip cases alongside the existing four variants.
+
 ## [0.0.5](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.4...v0.0.5) - 2026-05-29
 
 ### Other

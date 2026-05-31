@@ -10,7 +10,7 @@
 //! source — the algorithm is fully derived from the decoder recurrence
 //! in [`crate::ms`] / [`crate::ima_wav`].
 //!
-//! Four variants currently have encoders here:
+//! Five variants currently have encoders here:
 //!
 //! - **MS-ADPCM** (`adpcm_ms`, WAVEFORMATEX tag `0x0002`) — block size
 //!   defaults to 256 bytes per channel; the first 7 bytes per channel
@@ -40,6 +40,16 @@
 //!   block-oriented encoders use, because the per-byte ratio (2 samples
 //!   per byte) is too tight for the 16-candidate sweep to matter.
 //!
+//! - **Yamaha ADPCM** (`adpcm_yamaha`, WAVEFORMATEX tag `0x0020`) —
+//!   stream-oriented, no block framing. The encoder carries the
+//!   16-bit-clamped predictor + per-channel step across `send_frame`
+//!   calls. Closed-form quantiser per the Y8950 manual §I-4 *analysis*
+//!   recurrence: sign from `dn = Xn − x̂n`, then magnitude bits from the
+//!   eight `|dn|/Δn` thresholds {0, 1/4, 1/2, 3/4, 1, 5/4, 3/2, 7/4}
+//!   listed in Table 5-1 (YM2608) / Table 1 (AICA). State advances
+//!   through [`crate::yamaha::decode_nibble`] so encode is the
+//!   bit-for-bit inverse of decode.
+//!
 //! Default block sizes can be overridden via the `block_size` field on
 //! the encoder before the first call to `send_frame`. The default of
 //! 256 bytes per channel matches what ffmpeg's `-c:a adpcm_ms` /
@@ -51,6 +61,7 @@ use crate::dialogic;
 use crate::tables::{
     IMA_INDEX_ADJUST, IMA_STEP_SIZE, MS_ADAPTATION, MS_ADAPT_COEFF1, MS_ADAPT_COEFF2,
 };
+use crate::yamaha;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Encoder, Error, Frame, Packet, Result, TimeBase,
 };
@@ -831,6 +842,77 @@ impl Encoder for DialogicEncoder {
 }
 
 // ---------------------------------------------------------------------------
+// Yamaha encoder
+// ---------------------------------------------------------------------------
+
+/// Stream-oriented Yamaha-ADPCM encoder (`adpcm_yamaha`, WAVEFORMATEX
+/// tag `0x0020`).
+///
+/// Like the Dialogic encoder, Yamaha ADPCM is **stream-oriented**: no
+/// per-block header, predictor + step state carry across `send_frame`
+/// invocations. Each call quantises whatever PCM arrived, packs two
+/// nibbles per byte (low nibble first per the Y8950 manual and the
+/// WAV-tag-0x0020 convention), and emits a single packet.
+///
+/// Up to 8 channels (sample-interleaved on input, nibble-interleaved on
+/// the wire). The encoder picks each nibble in closed form from the
+/// Y8950 / AICA *analysis* recurrence (`dn = Xn − x̂n`, then magnitude
+/// bits by `|dn|/Δn` against the eight Table 5-1 / Table 1 thresholds),
+/// then advances state through [`yamaha::decode_nibble`] so the encoder
+/// is bit-for-bit equivalent to the decoder it ships with.
+pub struct YamahaEncoder {
+    output_params: CodecParameters,
+    channels: usize,
+    state: Vec<yamaha::Channel>,
+    pending: VecDeque<Packet>,
+    samples_emitted: i64,
+}
+
+impl Encoder for YamahaEncoder {
+    fn codec_id(&self) -> &CodecId {
+        &self.output_params.codec_id
+    }
+    fn output_params(&self) -> &CodecParameters {
+        &self.output_params
+    }
+    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        let af = match frame {
+            Frame::Audio(a) => a,
+            _ => return Err(Error::invalid("adpcm_yamaha encoder: expected audio frame")),
+        };
+        let mut pcm: Vec<i16> = Vec::new();
+        push_audio_frame_pcm(&mut pcm, af, self.channels)?;
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        // Yamaha packs 2 nibbles per byte; if the caller hands us an
+        // odd nibble count (i.e. an odd total sample count when summed
+        // across channels) the encoder pads a trailing zero nibble at
+        // the byte level, matching the decoder's tolerance.
+        let n_samples = pcm.len() as i64;
+        let bytes = yamaha::encode_packet(&pcm, &mut self.state);
+        let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
+        let pts = self.samples_emitted;
+        // pts counts samples-per-channel; n_samples is interleaved across
+        // channels, so divide.
+        self.samples_emitted += n_samples / self.channels as i64;
+        self.pending
+            .push_back(Packet::new(0, tb, bytes).with_pts(pts));
+        Ok(())
+    }
+    fn receive_packet(&mut self) -> Result<Packet> {
+        if let Some(p) = self.pending.pop_front() {
+            return Ok(p);
+        }
+        Err(Error::NeedMore)
+    }
+    fn flush(&mut self) -> Result<()> {
+        // Stream codec: nothing buffered after send_frame returns.
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers + factories
 // ---------------------------------------------------------------------------
 
@@ -913,6 +995,20 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 pending: VecDeque::new(),
                 samples_emitted: 0,
                 flushed: false,
+            }))
+        }
+        crate::CODEC_ID_YAMAHA => {
+            if channels > 8 {
+                return Err(Error::unsupported(format!(
+                    "adpcm_yamaha encoder: channels {channels} > 8 not supported"
+                )));
+            }
+            Ok(Box::new(YamahaEncoder {
+                output_params: params.clone(),
+                channels: channels as usize,
+                state: vec![yamaha::Channel::default(); channels as usize],
+                pending: VecDeque::new(),
+                samples_emitted: 0,
             }))
         }
         crate::CODEC_ID_DIALOGIC => {
@@ -1119,7 +1215,7 @@ mod tests {
 
     #[test]
     fn make_encoder_rejects_unknown_codec_id() {
-        let p = CodecParameters::audio(CodecId::new("adpcm_yamaha"));
+        let p = CodecParameters::audio(CodecId::new("adpcm_not_a_real_id"));
         let r = make_encoder(&p);
         assert!(r.is_err());
     }

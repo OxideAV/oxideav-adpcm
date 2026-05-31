@@ -18,25 +18,29 @@ are NOT re-implemented here.
 
 ## Status
 
-Decoders for all five supported codec ids. Encoders for four (the three
-block-oriented WAV variants plus the stream-oriented Dialogic VOX):
+Decoders **and** encoders for all five supported codec ids:
 
 | Codec id          | Decoder | Encoder |
 |-------------------|---------|---------|
 | `adpcm_ms`        | yes     | yes     |
 | `adpcm_ima_wav`   | yes     | yes     |
 | `adpcm_ima_qt`    | yes     | yes     |
-| `adpcm_yamaha`    | yes     | no      |
+| `adpcm_yamaha`    | yes     | yes     |
 | `adpcm_dialogic`  | yes     | yes     |
 
-The encoders use the textbook decoder-loop search: for each input PCM
-sample they evaluate all 16 candidate nibbles by simulating the
-decoder's recurrence forward, then emit the nibble whose reconstructed
-output minimises absolute error against the target. The algorithm is
-derived from the decoder recurrence already in this crate — no
-third-party encoder source was consulted. Round-trip RMS error for a
-20 ms 440 Hz sine at 22.05 kHz stays below 1500 LSB across all three
-encoders.
+The block-oriented WAV encoders (MS, IMA-WAV, IMA-QT) use the textbook
+decoder-loop search: for each input PCM sample they evaluate all 16
+candidate nibbles by simulating the decoder's recurrence forward, then
+emit the nibble whose reconstructed output minimises absolute error
+against the target. The stream-oriented encoders (Yamaha, Dialogic VOX)
+use closed-form quantisers derived directly from the spec's analysis
+recurrence — `sign(dn) | mag(|dn|/Δn)` against the 7-threshold ladder
+the manuals print. Both shapes are derived from the decoder recurrence
+already in this crate — no third-party encoder source was consulted.
+Round-trip RMS error for a 20 ms 440 Hz sine at 22.05 kHz stays below
+1500 LSB across the block-oriented encoders, and under 3000 LSB for the
+stream-oriented encoders (where step state has to converge from cold
+start).
 
 Default block size is 256 bytes per channel for the MS and IMA-WAV
 encoders (matches the default ffmpeg emits at 22050 Hz mono); override
