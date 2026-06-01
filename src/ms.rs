@@ -33,33 +33,44 @@ struct ChannelState {
     sample2: i32,
 }
 
-fn clamp_i16(x: i32) -> i16 {
-    x.clamp(i16::MIN as i32, i16::MAX as i32) as i16
-}
-
 fn decode_nibble(st: &mut ChannelState, nibble: u8) -> i16 {
     // Sign-extend 4-bit → i32 via (n ^ 8) - 8.
     let signed = ((nibble as i32) ^ 8) - 8;
 
-    // Linear predictor (scaled by 256).
-    let predicted = (st.sample1 * st.coef1 + st.sample2 * st.coef2) >> 8;
+    // Linear predictor (scaled by 256). The coefficient products stay
+    // inside i64 to keep arbitrary `sample1`/`sample2` from overflowing
+    // i32 — both are constrained to i16 by the time they re-enter as
+    // history but the *first* call reads sample1/sample2 from the block
+    // header, which can be any 16-bit value.
+    let predicted =
+        (st.sample1 as i64 * st.coef1 as i64 + st.sample2 as i64 * st.coef2 as i64) >> 8;
 
-    // Add error term.
-    let new = predicted + signed * st.delta;
-    let out = clamp_i16(new);
+    // Add error term (saturating; `delta` is a header-supplied i32 that
+    // can be arbitrary on malformed input).
+    let new = predicted.saturating_add(signed as i64 * st.delta as i64);
+    let out = clamp_i64_i16(new);
 
     // Shift history.
     st.sample2 = st.sample1;
     st.sample1 = out as i32;
 
-    // Update delta (adapt step).
-    let mut d = (MS_ADAPTATION[nibble as usize] * st.delta) >> 8;
+    // Update delta (adapt step). i64 keeps the table-multiplied delta
+    // from overflowing on inputs whose initial delta starts large; the
+    // mathematical recurrence the spec describes uses real numbers.
+    let mut d = ((MS_ADAPTATION[nibble as usize] as i64).saturating_mul(st.delta as i64)) >> 8;
     if d < 16 {
         d = 16;
     }
-    st.delta = d;
+    // Cap at i32::MAX so the next iteration's `signed * delta` still
+    // fits in i64 trivially; in well-formed streams `delta` never grows
+    // anywhere near this cap.
+    st.delta = d.min(i32::MAX as i64) as i32;
 
     out
+}
+
+fn clamp_i64_i16(x: i64) -> i16 {
+    x.clamp(i16::MIN as i64, i16::MAX as i64) as i16
 }
 
 /// Decode a single Microsoft-ADPCM block with `channels` channels.

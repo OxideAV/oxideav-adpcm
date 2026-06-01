@@ -7,8 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MS-ADPCM decoder integer overflow on adversarial input.** A block
+  whose header parsed a wild `delta` (signed-i16 read directly from
+  `block[channels..]`) could overflow the `MS_ADAPTATION[i] * delta`
+  i32 multiplication inside `decode_nibble`, panicking the decoder
+  under `debug-assertions` (and silently wrapping in release). Lifted
+  the delta-adapt + predictor recurrence to i64 with saturating
+  multiplication, then clamp back to i32 (capped at `i32::MAX`).
+  Spec-compliant streams produce bit-identical output (validated by
+  the existing ffmpeg-oracle round-trip tests); hostile inputs now
+  surface as bounded `Ok` decoded samples instead of a panic. Surfaced
+  by the new `tests/decoder_fuzz.rs::ms_truncated_prefixes_never_panic_mono`
+  coverage.
+
 ### Added
 
+- **Decoder fuzz / never-panic coverage** (`tests/decoder_fuzz.rs`) —
+  26 structured-malformation tests across all five variants
+  (`adpcm_ms`, `adpcm_ima_wav`, `adpcm_ima_qt`, `adpcm_yamaha`,
+  `adpcm_dialogic`). Truncated-prefix sweeps, every out-of-spec
+  predictor / step-index byte, body-misalignment cases, an in-test
+  deterministic LCG driving a few thousand pseudo-random bytes through
+  each decoder, and trait-level (`Decoder::send_packet` /
+  `receive_frame`) end-to-end pushes — every path must return `Ok` or
+  `Err` cleanly, never panic. Property-style assertions also pin the
+  spec-derived emitted-sample-count formulas (MS: `2 + body_bytes*2`,
+  IMA-WAV: `1 + groups*8`, IMA-QT: `64*channels`, Yamaha/Dialogic:
+  `2*packet_bytes`).
 - **Yamaha ADPCM encoder** (`encoder::YamahaEncoder`,
   `yamaha::encode_sample`, `yamaha::encode_packet`) — closes the
   last decoder-only variant in the crate. Closed-form quantiser

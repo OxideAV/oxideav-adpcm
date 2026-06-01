@@ -52,6 +52,29 @@ leading-edge transient inherent to per-block re-seeding, the IMA-QT
 encoder picks the initial step index from the mean |Δ| of the first
 samples in each block (rather than always seeding at 0).
 
+## Robustness
+
+`tests/decoder_fuzz.rs` enumerates structured-malformation coverage
+across all five variants: every out-of-spec predictor / step-index
+byte is rejected with `Err` (no panic); every prefix of a well-formed
+block is fed to the decoder to assert clean rejection of truncated
+inputs; a deterministic in-test LCG drives a few thousand
+pseudo-random bytes through each variant's `decode_packet`; and the
+trait-level `Decoder::send_packet` / `receive_frame` path is exercised
+on every variant with random packets. Property-style assertions also
+pin the spec-derived emitted-sample-count formulas (MS:
+`2 + body_bytes·2`; IMA-WAV: `1 + groups·8`; IMA-QT: `64·channels`;
+Yamaha / Dialogic: `2·packet_bytes`).
+
+The fuzz layer surfaced (and fixed) an integer-overflow path in
+`ms::decode_nibble`: an adversarial block header whose initial `delta`
+field was a large signed-i16 value could overflow the
+`MS_ADAPTATION[i] * delta` i32 multiplication after a handful of
+iterations. The recurrence now runs in i64 with saturating
+multiplication and a final clamp back to i32 — spec-compliant inputs
+are bit-identical (the existing ffmpeg-oracle round-trip tests still
+pass) and hostile ones emit bounded samples instead of panicking.
+
 ## Specs followed
 
 Each variant was implemented from its **public normative spec**, not from any
