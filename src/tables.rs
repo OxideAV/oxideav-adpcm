@@ -129,6 +129,73 @@ pub const OKI_PREDICTOR_MIN: i32 = -2048;
 /// Upper bound of the 12-bit signed reconstructed predictor `X`.
 pub const OKI_PREDICTOR_MAX: i32 = 2047;
 
+// ---------------- Yamaha ADPCM-A (YM2610 rhythm channels) ----------------
+//
+// Yamaha shipped *two* related but distinct 4-bit ADPCM schemes; the
+// ADPCM-B tables above target the variable-rate single-channel codec on
+// the Y8950 / YM2608-B / AICA / YMZ280B. The constants in this block
+// target the **second** Yamaha scheme — **ADPCM-A**, the 6 fixed-rate
+// rhythm/percussion channels unique to the YM2610 (and the YM2608's
+// rhythm ROM). Per the staged trace doc
+// `audio/adpcm/yamaha/yamaha-adpcm.md` §3, the exact ADPCM-A step table
+// is **not** printed numerically in the vendor datasheets — it is the
+// independent-RE consensus of the NeoGeo Development Wiki and the
+// MAME/ymfm hardware reverse-engineering effort, verified against real
+// YM2608/YM2610 silicon. The provenance is RE-of-hardware, not
+// extraction from any general-purpose multimedia decoder.
+//
+// 12-bit signed reconstructed signal (`-2048 ..= 2047`), 4-bit nibble
+// (`s mmm`: 1 sign + 3 magnitude bits), 49-entry step table (identical
+// to OKI/Dialogic Table 2), 16-entry index adjustment indexed by the
+// full 4-bit nibble. The index-adjust differs from OKI's variant:
+// ADPCM-A uses `{-1,-1,-1,-1, 2, 5, 7, 9, ...}` whereas OKI uses
+// `{-1,-1,-1,-1, 2, 4, 6, 8}` — the magnitude-7 step pointer grows by
+// 9 (not 8) per the YM2610 silicon RE.
+//
+// Per-sample decode recurrence (from the trace doc):
+//
+//     delta = (step_size[idx] * (mmm * 2 + 1)) / 8           // (mmm + 0.5) form
+//     if sign:  acc -= delta   else   acc += delta
+//     acc  = clamp(acc, -2048, 2047)                         // 12-bit signed
+//     idx  = clamp(idx + step_adj[nibble], 0, 48)
+//
+// The `(mmm * 2 + 1) / 8` form (= `mmm / 4 + 1/16` after the >>3) is the
+// chip's rounding rule for the residual contribution. This matches the
+// "(step_size[idx] * mmm) / 8 + step_size[idx] / 16" identity in the
+// trace doc (both expand to the same integer formula once distributed).
+
+/// 49-entry step-size table for Yamaha ADPCM-A.
+///
+/// Numerically identical to [`OKI_STEP_SIZE`] (both derive from the same
+/// `~16 * 1.1^x` step-size geometry); kept as a separate constant for
+/// docs / call-site provenance clarity. The pointer is clamped to
+/// `0 ..= 48` after each [`YAMAHA_A_INDEX_ADJUST`] update.
+pub const YAMAHA_A_STEP_SIZE: [i16; 49] = [
+    16, 17, 19, 21, 23, 25, 28, 31, 34, 37, 41, 45, 50, 55, 60, 66, 73, 80, 88, 97, 107, 118, 130,
+    143, 157, 173, 190, 209, 230, 253, 279, 307, 337, 371, 408, 449, 494, 544, 598, 658, 724, 796,
+    876, 963, 1060, 1166, 1282, 1411, 1552,
+];
+
+/// 16-entry index-adjustment table for Yamaha ADPCM-A, indexed by the
+/// raw 4-bit nibble. The four small-magnitude codes shrink the pointer
+/// by 1; the four large-magnitude codes grow it by `{2, 5, 7, 9}`
+/// (vs OKI's `{2, 4, 6, 8}`). The high (sign) bit doesn't affect the
+/// adjustment — entries `0..7` mirror `8..15`.
+pub const YAMAHA_A_INDEX_ADJUST: [i32; 16] =
+    [-1, -1, -1, -1, 2, 5, 7, 9, -1, -1, -1, -1, 2, 5, 7, 9];
+
+/// Minimum value of the running step pointer (49-entry table starts at
+/// index 0 = step value 16).
+pub const YAMAHA_A_STEP_INDEX_MIN: i32 = 0;
+/// Maximum value of the running step pointer (49-entry table ends at
+/// index 48 = step value 1552).
+pub const YAMAHA_A_STEP_INDEX_MAX: i32 = 48;
+
+/// Lower bound of the 12-bit signed reconstructed sample.
+pub const YAMAHA_A_PREDICTOR_MIN: i32 = -2048;
+/// Upper bound of the 12-bit signed reconstructed sample.
+pub const YAMAHA_A_PREDICTOR_MAX: i32 = 2047;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,6 +246,60 @@ mod tests {
         assert_eq!(OKI_INDEX_ADJUST[3], -1);
         assert_eq!(OKI_INDEX_ADJUST[4], 2);
         assert_eq!(OKI_INDEX_ADJUST[7], 8);
+    }
+
+    #[test]
+    fn yamaha_a_tables_have_expected_shape() {
+        // 49-entry step table, 16-entry adjust table (sign-bit-mirrored
+        // halves), 12-bit predictor clamp range.
+        assert_eq!(YAMAHA_A_STEP_SIZE.len(), 49);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST.len(), 16);
+        // First/last entries from the RE-derived table.
+        assert_eq!(YAMAHA_A_STEP_SIZE[0], 16);
+        assert_eq!(YAMAHA_A_STEP_SIZE[48], 1552);
+        // Adjust table: lower half mirrors upper half (sign bit doesn't
+        // affect step adjustment).
+        for m in 0..8 {
+            assert_eq!(YAMAHA_A_INDEX_ADJUST[m], YAMAHA_A_INDEX_ADJUST[m + 8]);
+        }
+        // Small magnitudes shrink; large magnitudes grow by 2/5/7/9.
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[0], -1);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[3], -1);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[4], 2);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[5], 5);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[6], 7);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[7], 9);
+        // 12-bit predictor range.
+        assert_eq!(YAMAHA_A_PREDICTOR_MIN, -2048);
+        assert_eq!(YAMAHA_A_PREDICTOR_MAX, 2047);
+    }
+
+    #[test]
+    fn yamaha_a_step_table_matches_oki_step_table_numerically() {
+        // Both ADPCM-A and OKI/Dialogic VOX use the same 49-entry
+        // `~16 * 1.1^x` step-size geometry; the index-adjust tables
+        // differ but the step values are identical.
+        for i in 0..49 {
+            assert_eq!(
+                YAMAHA_A_STEP_SIZE[i], OKI_STEP_SIZE[i],
+                "Yamaha ADPCM-A vs OKI step table mismatch at index {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn yamaha_a_adjust_differs_from_oki_adjust_at_large_magnitudes() {
+        // Documents the one numeric distinction between the two related
+        // tables: the magnitude-5/6/7 step growth differs.
+        // OKI: {2, 4, 6, 8}; ADPCM-A: {2, 5, 7, 9}.
+        assert_eq!(OKI_INDEX_ADJUST[4], 2);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[4], 2);
+        assert_eq!(OKI_INDEX_ADJUST[5], 4);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[5], 5);
+        assert_eq!(OKI_INDEX_ADJUST[6], 6);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[6], 7);
+        assert_eq!(OKI_INDEX_ADJUST[7], 8);
+        assert_eq!(YAMAHA_A_INDEX_ADJUST[7], 9);
     }
 
     #[test]

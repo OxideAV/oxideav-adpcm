@@ -5,7 +5,7 @@
 //! packet immediately and stores the decoded PCM in `pending`, then
 //! `receive_frame` emits exactly one `AudioFrame` and drops the buffer.
 
-use crate::{dialogic, ima_qt, ima_wav, ms, yamaha};
+use crate::{dialogic, ima_qt, ima_wav, ms, yamaha, yamaha_a};
 use oxideav_core::Decoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
@@ -16,6 +16,7 @@ pub enum Variant {
     ImaWav,
     ImaQt,
     Yamaha,
+    YamahaA,
     Dialogic,
 }
 
@@ -26,6 +27,7 @@ impl Variant {
             crate::CODEC_ID_IMA_WAV => Some(Self::ImaWav),
             crate::CODEC_ID_IMA_QT => Some(Self::ImaQt),
             crate::CODEC_ID_YAMAHA => Some(Self::Yamaha),
+            crate::CODEC_ID_YAMAHA_A => Some(Self::YamahaA),
             crate::CODEC_ID_DIALOGIC => Some(Self::Dialogic),
             _ => None,
         }
@@ -60,6 +62,16 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
             }
         }
         Variant::Yamaha => {}
+        Variant::YamahaA => {
+            // YM2608 / YM2610 rhythm channels are individually single-
+            // channel ADPCM-A streams; we reject anything other than
+            // mono to keep the wire contract obvious.
+            if channels != 1 {
+                return Err(Error::unsupported(format!(
+                    "adpcm_yamaha_a: only mono supported (got {channels} channels)"
+                )));
+            }
+        }
         Variant::Dialogic => {
             dialogic::validate_channels(channels)?;
         }
@@ -70,6 +82,7 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         channels,
         pending: None,
         yamaha_state: vec![yamaha::Channel::default(); channels as usize],
+        yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
         dialogic_state: vec![dialogic::Channel::default(); channels as usize],
         eof: false,
     }))
@@ -89,6 +102,8 @@ pub struct AdpcmDecoder {
     // Yamaha carries state across packets; the other block-oriented
     // variants re-seed per block.
     yamaha_state: Vec<yamaha::Channel>,
+    // Yamaha ADPCM-A is also stream-oriented (12-bit silicon).
+    yamaha_a_state: Vec<yamaha_a::Channel>,
     // Dialogic / OKI VOX is also stream-oriented (state persists across
     // packets — no per-block resets).
     dialogic_state: Vec<dialogic::Channel>,
@@ -128,6 +143,11 @@ impl AdpcmDecoder {
                 out
             }
             Variant::Yamaha => yamaha::decode_packet(&pkt.data, &mut self.yamaha_state),
+            Variant::YamahaA => yamaha_a::decode_packet(
+                &pkt.data,
+                &mut self.yamaha_a_state,
+                yamaha_a::Output::Wide16,
+            ),
             Variant::Dialogic => dialogic::decode_packet(
                 &pkt.data,
                 &mut self.dialogic_state,
@@ -194,10 +214,13 @@ impl Decoder for AdpcmDecoder {
     fn reset(&mut self) -> Result<()> {
         self.pending = None;
         self.eof = false;
-        // Re-seed per-channel Yamaha + Dialogic state. MS / IMA are
-        // memoryless per block so no further action needed.
+        // Re-seed per-channel Yamaha (A + B) + Dialogic state. MS /
+        // IMA are memoryless per block so no further action needed.
         for st in &mut self.yamaha_state {
             *st = yamaha::Channel::default();
+        }
+        for st in &mut self.yamaha_a_state {
+            *st = yamaha_a::Channel::default();
         }
         for st in &mut self.dialogic_state {
             *st = dialogic::Channel::default();

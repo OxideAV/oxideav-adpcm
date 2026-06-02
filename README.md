@@ -10,7 +10,8 @@ Code Modulation) audio formats found in WAV / AVI / QuickTime streams.
 | `adpcm_ms`        | Microsoft ADPCM               | WAV tag `0x0002` / AVI      |
 | `adpcm_ima_wav`   | IMA / DVI ADPCM — WAV variant | WAV tag `0x0011`            |
 | `adpcm_ima_qt`    | IMA ADPCM — QuickTime variant | QuickTime / MOV (fourcc `ima4`) |
-| `adpcm_yamaha`    | Yamaha ADPCM (Y8950/YM2608)   | WAV tag `0x0020` / `AICA`   |
+| `adpcm_yamaha`    | Yamaha ADPCM-B / DELTA-T (Y8950/YM2608-B/YMZ280B/AICA) | WAV tag `0x0020` |
+| `adpcm_yamaha_a`  | Yamaha ADPCM-A (YM2608/YM2610 rhythm channels) | chip-internal; no WAV tag |
 | `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless; no WAV tag) |
 
 G.722 (WAV tag `0x0028`) and G.726/G.723.1/G.729 live in their own crates and
@@ -18,7 +19,7 @@ are NOT re-implemented here.
 
 ## Status
 
-Decoders **and** encoders for all five supported codec ids:
+Decoders **and** encoders for all six supported codec ids:
 
 | Codec id          | Decoder | Encoder |
 |-------------------|---------|---------|
@@ -26,6 +27,7 @@ Decoders **and** encoders for all five supported codec ids:
 | `adpcm_ima_wav`   | yes     | yes     |
 | `adpcm_ima_qt`    | yes     | yes     |
 | `adpcm_yamaha`    | yes     | yes     |
+| `adpcm_yamaha_a`  | yes     | yes     |
 | `adpcm_dialogic`  | yes     | yes     |
 
 The block-oriented WAV encoders (MS, IMA-WAV, IMA-QT) use the textbook
@@ -95,10 +97,23 @@ implementation:
 - **Apple QuickTime IMA ADPCM** — 34-byte fixed block, big-endian preamble
   (9-bit predictor + 7-bit step index), block-level channel interleave, per
   [MultimediaWiki Apple QuickTime IMA ADPCM](https://wiki.multimedia.cx/index.php/Apple_QuickTime_IMA_ADPCM).
-- **Yamaha ADPCM** — step-adaptation rate table and
-  `X(n+1) = X(n) + sign(L4) * (L3 + L2/2 + L1/4 + 1/8) * Δn` update rule
-  from Yamaha's public *Y8950 (MSX-AUDIO) Application Manual*, section I-4
-  and Table I-2. See [Y8950 manual PDF](https://map.grauw.nl/resources/sound/yamaha_y8950.pdf).
+- **Yamaha ADPCM-B / DELTA-T** (`adpcm_yamaha`) — step-adaptation rate
+  table and `X(n+1) = X(n) + sign(L4) * (L3 + L2/2 + L1/4 + 1/8) * Δn`
+  update rule from Yamaha's public *Y8950 (MSX-AUDIO) Application
+  Manual*, section I-4 and Table I-2. See
+  [Y8950 manual PDF](https://map.grauw.nl/resources/sound/yamaha_y8950.pdf).
+- **Yamaha ADPCM-A** (`adpcm_yamaha_a`) — the YM2608 rhythm-ROM /
+  YM2610 ADPCM-A channel codec. 4-bit nibble (1 sign + 3 magnitude),
+  12-bit signed reconstructed acc clamped to `-2048..=2047`, 49-entry
+  step-size table (`16 .. 1552`, identical geometry to OKI Table 2) and
+  16-entry step-pointer adjustment `{-1,-1,-1,-1, 2, 5, 7, 9, ...}`.
+  Tables transcribed from `docs/audio/adpcm/yamaha/yamaha-adpcm.md` §3
+  (independent-RE consensus of the NeoGeo Development Wiki and the
+  MAME/ymfm hardware-RE effort, verified against real YM2608/YM2610
+  silicon — NOT from any general-purpose multimedia decoder). Single
+  channel per stream by chip design; the registry decoder + encoder
+  reject stereo with `Error::Unsupported`. 12→16-bit narrowing is
+  handled internally so consumers always see i16-LE PCM on output.
 - **OKI / Dialogic VOX ADPCM** — 49-entry calculated step-size table
   (Table 2) and 8-entry magnitude-indexed step-pointer adjustment (the
   row-collapsed form of Table 1) from Dialogic Corporation's *Dialogic

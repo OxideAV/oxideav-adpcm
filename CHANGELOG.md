@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Yamaha ADPCM-A** (`adpcm_yamaha_a`) — second Yamaha 4-bit ADPCM
+  flavour, the YM2608 rhythm-ROM / YM2610 ADPCM-A channel codec.
+  Distinct from the existing ADPCM-B / DELTA-T (`adpcm_yamaha`)
+  variant: ADPCM-A uses a 49-entry step-size table (`16 .. 1552`,
+  numerically identical to OKI/Dialogic Table 2) and a 16-entry
+  step-pointer adjustment `{-1,-1,-1,-1, 2, 5, 7, 9, ...}` (versus
+  OKI's `{2, 4, 6, 8}` upper half — the magnitude-7 growth differs).
+  Output is 12-bit signed (`-2048 ..= 2047`) clamped on the silicon;
+  the registry-resolved decoder shifts to 16-bit so consumers see
+  uniform i16-LE PCM. New module `src/yamaha_a.rs` (decoder + encoder
+  + Native12/Wide16 output enum); new tables `YAMAHA_A_STEP_SIZE` +
+  `YAMAHA_A_INDEX_ADJUST` + `YAMAHA_A_PREDICTOR_{MIN,MAX}` in
+  `tables.rs` transcribed directly from
+  `docs/audio/adpcm/yamaha/yamaha-adpcm.md` §3 (independent-RE consensus
+  of the NeoGeo Development Wiki + MAME/ymfm hardware-RE effort against
+  real YM2608/YM2610 silicon — NOT from any general-purpose multimedia
+  decoder source). Single channel by chip design; the factory rejects
+  stereo with `Error::Unsupported`. Stream-oriented (per-byte state
+  carries across `send_frame` calls). Round-trip RMS for a 50 ms
+  220 Hz sine at 8 kHz wide-16 amp 6000 stays under 4500 LSB; through
+  the registry on a 100 ms 440 Hz sine at amp 12000, under 7000 LSB.
+  5 new fuzz-style coverage tests + 1 registry round-trip + 2 factory
+  unit tests; existing factory sweeps extended to cover the 6th
+  variant.
+
 ### Fixed
 
 - **MS-ADPCM decoder integer overflow on adversarial input.** A block

@@ -62,6 +62,7 @@ use crate::tables::{
     IMA_INDEX_ADJUST, IMA_STEP_SIZE, MS_ADAPTATION, MS_ADAPT_COEFF1, MS_ADAPT_COEFF2,
 };
 use crate::yamaha;
+use crate::yamaha_a;
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, Encoder, Error, Frame, Packet, Result, TimeBase,
 };
@@ -913,6 +914,66 @@ impl Encoder for YamahaEncoder {
 }
 
 // ---------------------------------------------------------------------------
+// Yamaha ADPCM-A encoder
+// ---------------------------------------------------------------------------
+
+/// Stream-oriented Yamaha **ADPCM-A** encoder (`adpcm_yamaha_a`).
+///
+/// 12-bit single-channel codec used on the YM2608 rhythm ROM and the
+/// YM2610 ADPCM-A channels. The encoder narrows the incoming i16 PCM to
+/// the 12-bit silicon range internally, picks the closest of the eight
+/// `± (2*mag + 1) * step / 8` reconstruction levels per sample, then
+/// advances state through [`yamaha_a::decode_nibble`] so encode is the
+/// bit-for-bit inverse of decode.
+pub struct YamahaAEncoder {
+    output_params: CodecParameters,
+    state: Vec<yamaha_a::Channel>,
+    pending: VecDeque<Packet>,
+    samples_emitted: i64,
+}
+
+impl Encoder for YamahaAEncoder {
+    fn codec_id(&self) -> &CodecId {
+        &self.output_params.codec_id
+    }
+    fn output_params(&self) -> &CodecParameters {
+        &self.output_params
+    }
+    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        let af = match frame {
+            Frame::Audio(a) => a,
+            _ => {
+                return Err(Error::invalid(
+                    "adpcm_yamaha_a encoder: expected audio frame",
+                ))
+            }
+        };
+        let mut pcm: Vec<i16> = Vec::new();
+        push_audio_frame_pcm(&mut pcm, af, 1)?;
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        let n_samples = pcm.len() as i64;
+        let bytes = yamaha_a::encode_packet(&pcm, &mut self.state, yamaha_a::Output::Wide16);
+        let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
+        let pts = self.samples_emitted;
+        self.samples_emitted += n_samples;
+        self.pending
+            .push_back(Packet::new(0, tb, bytes).with_pts(pts));
+        Ok(())
+    }
+    fn receive_packet(&mut self) -> Result<Packet> {
+        if let Some(p) = self.pending.pop_front() {
+            return Ok(p);
+        }
+        Err(Error::NeedMore)
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers + factories
 // ---------------------------------------------------------------------------
 
@@ -1007,6 +1068,19 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 output_params: params.clone(),
                 channels: channels as usize,
                 state: vec![yamaha::Channel::default(); channels as usize],
+                pending: VecDeque::new(),
+                samples_emitted: 0,
+            }))
+        }
+        crate::CODEC_ID_YAMAHA_A => {
+            if channels != 1 {
+                return Err(Error::unsupported(format!(
+                    "adpcm_yamaha_a encoder: only mono supported (got {channels} channels)"
+                )));
+            }
+            Ok(Box::new(YamahaAEncoder {
+                output_params: params.clone(),
+                state: vec![yamaha_a::Channel::default(); 1],
                 pending: VecDeque::new(),
                 samples_emitted: 0,
             }))
@@ -1218,6 +1292,46 @@ mod tests {
         let p = CodecParameters::audio(CodecId::new("adpcm_not_a_real_id"));
         let r = make_encoder(&p);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn yamaha_a_factory_builds_via_make_encoder_for_mono_only() {
+        // Mono is the only valid config for ADPCM-A (chip-internal codec
+        // = single rhythm channel per stream).
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_YAMAHA_A));
+        p.sample_rate = Some(22_050);
+        p.channels = Some(1);
+        let _enc = make_encoder(&p).expect("ADPCM-A mono encoder factory");
+
+        // Stereo and 0-channel are rejected with `unsupported`.
+        let mut p2 = CodecParameters::audio(CodecId::new(crate::CODEC_ID_YAMAHA_A));
+        p2.sample_rate = Some(22_050);
+        p2.channels = Some(2);
+        assert!(
+            make_encoder(&p2).is_err(),
+            "stereo ADPCM-A encoder should be rejected"
+        );
+    }
+
+    #[test]
+    fn yamaha_a_encoder_emits_one_packet_per_send_frame() {
+        // Stream-oriented: one `send_frame` → one packet.
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_YAMAHA_A));
+        p.sample_rate = Some(8_000);
+        p.channels = Some(1);
+        let mut enc = make_encoder(&p).unwrap();
+        let pcm = sine_pcm(200, 220.0, 8_000.0, 6_000.0);
+        let pcm_bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let af = AudioFrame {
+            samples: 200,
+            pts: Some(0),
+            data: vec![pcm_bytes],
+        };
+        enc.send_frame(&Frame::Audio(af)).unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        // 200 samples → 100 bytes (two nibbles per byte).
+        assert_eq!(pkt.data.len(), 100);
+        assert!(matches!(enc.receive_packet(), Err(Error::NeedMore)));
     }
 
     // ---------------- IMA-QT encoder tests ----------------

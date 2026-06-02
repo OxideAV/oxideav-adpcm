@@ -11,7 +11,7 @@
 
 use oxideav_adpcm::{
     register_codecs, CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
-    CODEC_ID_YAMAHA,
+    CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
 };
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
@@ -166,6 +166,26 @@ fn yamaha_stereo_round_trip_via_registry() {
     assert_eq!(decoded.len(), pcm.len());
     let rms = rms_error(&decoded, &pcm);
     assert!(rms < 3000.0, "Yamaha stereo registry round-trip RMS {rms}");
+}
+
+#[test]
+fn yamaha_a_mono_round_trip_via_registry() {
+    // Yamaha ADPCM-A is single-channel by construction (one YM2610
+    // rhythm channel). 12-bit silicon → wide-16 pipeline; the
+    // registry-resolved decoder shifts 12-bit acc left by 4 to fill the
+    // i16 output, so a moderate-amplitude sine fits cleanly. The
+    // step pointer takes ~12 samples to ramp from 0, so we choose a
+    // long enough run that the leading-edge transient is amortised.
+    let (pcm, decoded) = round_trip(CODEC_ID_YAMAHA_A, 1, 800, 8000);
+    assert_eq!(decoded.len(), pcm.len());
+    let rms = rms_error(&decoded, &pcm);
+    // 12-bit codec on a wide-16 pipeline: per-sample LSB is 16 (= 2^4);
+    // a 12-bit codec on an 8 kHz 440 Hz sine of amplitude 12000 expects
+    // RMS error in the 4500-6500 LSB range. We bound at 7000.
+    assert!(
+        rms < 7000.0,
+        "Yamaha ADPCM-A mono registry round-trip RMS {rms} > 7000"
+    );
 }
 
 #[test]

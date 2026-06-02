@@ -32,8 +32,8 @@
 //! glue path is on the no-panic contract as well.
 
 use oxideav_adpcm::{
-    decoder, dialogic, ima_qt, ima_wav, ms, register_codecs, yamaha, CODEC_ID_DIALOGIC,
-    CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA,
+    decoder, dialogic, ima_qt, ima_wav, ms, register_codecs, yamaha, yamaha_a, CODEC_ID_DIALOGIC,
+    CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
 };
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Packet, TimeBase};
 
@@ -362,6 +362,93 @@ fn yamaha_encode_then_decode_preserves_sample_count() {
     }
 }
 
+// ----- Yamaha ADPCM-A ----------------------------------------------
+
+/// Yamaha ADPCM-A: any byte stream is structurally valid (no headers,
+/// single channel). Two output samples per byte. State invariants:
+/// 12-bit signed acc, step pointer in `0..=48`.
+#[test]
+fn yamaha_a_any_byte_stream_decodes_to_two_samples_per_byte() {
+    let mut rng = Lcg::new(0xA0A0_0001);
+    for len in [0usize, 1, 2, 7, 64, 1024] {
+        let mut packet = vec![0u8; len];
+        rng.fill(&mut packet);
+        let mut state = [yamaha_a::Channel::default()];
+        let pcm = yamaha_a::decode_packet(&packet, &mut state, yamaha_a::Output::Native12);
+        assert_eq!(pcm.len(), len * 2, "len {len}");
+        // 12-bit signed acc inside its clamp range.
+        assert!(state[0].acc >= -2048, "acc underflow: {}", state[0].acc);
+        assert!(state[0].acc <= 2047, "acc overflow: {}", state[0].acc);
+        assert!(state[0].step_index >= 0);
+        assert!(state[0].step_index <= 48);
+    }
+}
+
+/// Yamaha ADPCM-A Wide16: every sample inside `[-32768, 32752]`
+/// (= 12-bit clamp left-shifted by 4).
+#[test]
+fn yamaha_a_wide16_output_stays_within_documented_range() {
+    let mut rng = Lcg::new(0xA0A0_0002);
+    let mut packet = vec![0u8; 2048];
+    rng.fill(&mut packet);
+    let mut state = [yamaha_a::Channel::default()];
+    let pcm = yamaha_a::decode_packet(&packet, &mut state, yamaha_a::Output::Wide16);
+    for &s in &pcm {
+        assert!((-32768..=32752).contains(&s), "Wide16 sample {s} OOR");
+    }
+}
+
+/// Yamaha ADPCM-A: empty state or empty packet → empty output, no panic.
+#[test]
+fn yamaha_a_empty_inputs_produce_empty_outputs() {
+    let mut state = [yamaha_a::Channel::default()];
+    let pcm = yamaha_a::decode_packet(&[], &mut state, yamaha_a::Output::Native12);
+    assert!(pcm.is_empty());
+    let mut empty: [yamaha_a::Channel; 0] = [];
+    let pcm = yamaha_a::decode_packet(&[0xAA, 0x55], &mut empty, yamaha_a::Output::Wide16);
+    assert!(pcm.is_empty());
+}
+
+/// Yamaha ADPCM-A encoder: encode→decode preserves sample count
+/// (with the trailing-zero-nibble pad rule for odd inputs).
+#[test]
+fn yamaha_a_encode_then_decode_preserves_sample_count() {
+    let mut rng = Lcg::new(0xA0A0_0003);
+    for len in [0usize, 1, 7, 64, 511, 1024] {
+        let pcm: Vec<i16> = (0..len)
+            .map(|_| {
+                rng.next_u8();
+                ((rng.next_u8() as i16) << 4) - 1024
+            })
+            .collect();
+        let mut enc_state = [yamaha_a::Channel::default()];
+        let bytes = yamaha_a::encode_packet(&pcm, &mut enc_state, yamaha_a::Output::Wide16);
+        assert_eq!(bytes.len(), len.div_ceil(2));
+        let mut dec_state = [yamaha_a::Channel::default()];
+        let decoded = yamaha_a::decode_packet(&bytes, &mut dec_state, yamaha_a::Output::Wide16);
+        assert_eq!(decoded.len(), bytes.len() * 2);
+    }
+}
+
+/// Yamaha ADPCM-A factory rejects stereo (the codec is single-channel
+/// by chip design).
+#[test]
+fn yamaha_a_factory_rejects_stereo() {
+    let mut reg = CodecRegistry::new();
+    register_codecs(&mut reg);
+    let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_YAMAHA_A));
+    params.sample_rate = Some(22_050);
+    params.channels = Some(2);
+    assert!(
+        reg.first_decoder(&params).is_err(),
+        "stereo ADPCM-A should be rejected"
+    );
+    assert!(
+        reg.first_encoder(&params).is_err(),
+        "stereo ADPCM-A encoder should be rejected"
+    );
+}
+
 // ----- OKI / Dialogic -----------------------------------------------
 
 /// Dialogic: any byte stream decodes; both nibble orders produce
@@ -451,6 +538,7 @@ fn registry_decoder_send_random_packet_never_panics() {
         CODEC_ID_IMA_WAV,
         CODEC_ID_IMA_QT,
         CODEC_ID_YAMAHA,
+        CODEC_ID_YAMAHA_A,
         CODEC_ID_DIALOGIC,
     ] {
         let mut params = CodecParameters::audio(CodecId::new(codec_id));
@@ -498,6 +586,7 @@ fn registry_decoder_accepts_empty_packets() {
         CODEC_ID_IMA_WAV,
         CODEC_ID_IMA_QT,
         CODEC_ID_YAMAHA,
+        CODEC_ID_YAMAHA_A,
         CODEC_ID_DIALOGIC,
     ] {
         let mut params = CodecParameters::audio(CodecId::new(codec_id));
@@ -529,6 +618,7 @@ fn registry_decoder_factory_rejects_zero_channels() {
         CODEC_ID_IMA_WAV,
         CODEC_ID_IMA_QT,
         CODEC_ID_YAMAHA,
+        CODEC_ID_YAMAHA_A,
         CODEC_ID_DIALOGIC,
     ] {
         let mut params = CodecParameters::audio(CodecId::new(codec_id));
@@ -567,6 +657,7 @@ fn registry_decoder_reports_its_codec_id() {
         CODEC_ID_IMA_WAV,
         CODEC_ID_IMA_QT,
         CODEC_ID_YAMAHA,
+        CODEC_ID_YAMAHA_A,
         CODEC_ID_DIALOGIC,
     ] {
         let mut params = CodecParameters::audio(CodecId::new(codec_id));
