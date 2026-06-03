@@ -77,6 +77,30 @@ multiplication and a final clamp back to i32 — spec-compliant inputs
 are bit-identical (the existing ffmpeg-oracle round-trip tests still
 pass) and hostile ones emit bounded samples instead of panicking.
 
+## Benchmarks
+
+A Criterion harness lives at `benches/decode.rs` covering the
+per-block / per-packet decode hot path across all six variants — 11
+scenarios in total, spanning MS / IMA-WAV mono+stereo at 256-byte and
+512-byte block sizes, the fixed 34-byte IMA-QT block mono+stereo, the
+Yamaha ADPCM-B mono+stereo streaming path, the Yamaha ADPCM-A mono
+12→16-bit widening path, and both Dialogic VOX nibble orders
+(HiFirst/Wide16 + LoFirst/Native12). All inputs are synthesised
+in-bench from a deterministic xorshift32 seed: block-oriented variants
+build a valid encoded buffer via the crate's public encoder at setup
+time so the timed loop measures only the decoder, while
+stream-oriented variants feed the byte stream straight into
+`decode_packet`. No `docs/` fixtures or external files are read. Run
+with:
+
+    cargo bench -p oxideav-adpcm --bench decode
+
+The harness is intended as a stable A/B baseline for future
+optimisation rounds (block-aligned SIMD, per-sample LUT, no-bounds-
+check inner loops, predictor-fold rewrites) — the numbers themselves
+aren't pinned to any specific microarchitecture, only their relative
+ratios across crate versions.
+
 ## Specs followed
 
 Each variant was implemented from its **public normative spec**, not from any

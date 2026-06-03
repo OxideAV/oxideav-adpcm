@@ -14,3 +14,21 @@ categories = ["multimedia::encoding", "multimedia::audio"]
 
 [dependencies]
 oxideav-core = "0.1"
+
+[dev-dependencies]
+# Round 216 (depth-mode benchmarks): Criterion drives the `decode`
+# bench harness so future optimisation rounds can A/B-test their
+# tweaks to the per-block / per-packet ADPCM decode hot paths against
+# a stable, fixture-free baseline. Pinned to the same 0.5 line the
+# sibling crates with benches (g711, flac, tta, magicyuv, h264,
+# cinepak, pixfmt) already track.
+criterion = "0.5"
+
+# Round 216 benches. Self-contained — every PCM / nibble input is
+# synthesised in-bench from a deterministic xorshift seed and fed
+# through the crate's public per-block / per-packet helpers. No
+# `docs/` fixtures or external files are read. Run with:
+#     cargo bench -p oxideav-adpcm --bench decode
+[[bench]]
+name = "decode"
+harness = false

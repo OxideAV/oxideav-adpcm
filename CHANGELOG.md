@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Criterion bench harness** (`benches/decode.rs`) — depth-mode
+  benchmark coverage for the per-block / per-packet decode hot path
+  across all six ADPCM variants. 11 scenarios: MS-ADPCM mono
+  (256-byte blocks, ~1 s @ 22050 Hz) + stereo (512-byte blocks,
+  ~500 ms); IMA-ADPCM-WAV mono + stereo at the same shapes; IMA-ADPCM
+  QuickTime mono + stereo at the spec-mandated 34-byte block; Yamaha
+  ADPCM-B mono + stereo streaming at 8 kHz; Yamaha ADPCM-A mono with
+  the 12→16-bit `Wide16` output; Dialogic VOX mono in both nibble
+  orders (HiFirst/Wide16 — canonical `.vox`/MSM6295 — and
+  LoFirst/Native12 — MSM6258). Block-oriented variants build a valid
+  encoded buffer via the crate's public encoder at setup time, so the
+  timed loop measures only the decoder. Stream-oriented variants feed
+  a deterministic xorshift32 byte stream straight into
+  `decode_packet`. New `criterion = "0.5"` dev-dep, new
+  `[[bench]] name = "decode"` harness; no library-API change. Run
+  with `cargo bench -p oxideav-adpcm --bench decode`. Per the
+  workspace "saturated → fuzz/bench/profile" memo — every variant has
+  shipped feature-complete decoder + encoder pairs (README "Status"
+  table all `yes/yes`), so the next observable improvement is making
+  the existing implementation faster against a stable, fixture-free
+  A/B baseline.
+
 - **Yamaha ADPCM-A** (`adpcm_yamaha_a`) — second Yamaha 4-bit ADPCM
   flavour, the YM2608 rhythm-ROM / YM2610 ADPCM-A channel codec.
   Distinct from the existing ADPCM-B / DELTA-T (`adpcm_yamaha`)
