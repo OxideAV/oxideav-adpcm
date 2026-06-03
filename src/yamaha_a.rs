@@ -72,11 +72,24 @@ pub enum Output {
 
 /// Decode one nibble, advancing `state`, and return the reconstructed
 /// sample at the requested width.
+///
+/// Caller-supplied `state` is clamped on entry — an out-of-spec seed
+/// (negative `step_index`, `acc` outside the 12-bit signed range) is
+/// treated as if it had been clamped on its previous update step.
+/// This keeps the decoder's never-panic contract robust against
+/// adversarial encoder-state seeds that the cargo-fuzz harness threads
+/// directly into [`Channel`].
 #[inline]
 pub fn decode_nibble(state: &mut Channel, nibble: u8, output: Output) -> i16 {
     let mag = (nibble & 0x07) as i32;
     let sign = (nibble & 0x08) != 0;
 
+    state.step_index = state
+        .step_index
+        .clamp(YAMAHA_A_STEP_INDEX_MIN, YAMAHA_A_STEP_INDEX_MAX);
+    state.acc = state
+        .acc
+        .clamp(YAMAHA_A_PREDICTOR_MIN, YAMAHA_A_PREDICTOR_MAX);
     let step = YAMAHA_A_STEP_SIZE[state.step_index as usize] as i32;
 
     // Reconstruction contribution. The chip formula `delta = step *
@@ -154,6 +167,15 @@ pub fn encode_sample(state: &mut Channel, target: i16, output: Output) -> (u8, i
         Output::Wide16 => (wide >> 4).clamp(YAMAHA_A_PREDICTOR_MIN, YAMAHA_A_PREDICTOR_MAX),
     };
 
+    // Clamp the (possibly caller-supplied) state to the spec range
+    // before indexing the step table — same robustness contract as
+    // [`decode_nibble`].
+    state.step_index = state
+        .step_index
+        .clamp(YAMAHA_A_STEP_INDEX_MIN, YAMAHA_A_STEP_INDEX_MAX);
+    state.acc = state
+        .acc
+        .clamp(YAMAHA_A_PREDICTOR_MIN, YAMAHA_A_PREDICTOR_MAX);
     let dn = target_native - state.acc;
     let (sign_bit, abs_dn) = if dn < 0 {
         (0x8u8, (-dn) as i64)

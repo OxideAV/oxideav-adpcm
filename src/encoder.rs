@@ -87,25 +87,44 @@ struct MsState {
     sample2: i32,
 }
 
-fn clamp_i16(x: i32) -> i16 {
-    x.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+fn clamp_i16(x: i64) -> i16 {
+    x.clamp(i16::MIN as i64, i16::MAX as i64) as i16
 }
 
 /// Run the MS-ADPCM decoder recurrence for one nibble. Returns the
 /// reconstructed sample without mutating `st`.
+///
+/// Arithmetic widened to i64 with saturating multiplication so an
+/// adversarial encoder state (extreme PCM seed pushing `sample1` /
+/// `sample2` to ±i16, then a wildly-grown `delta` after several search
+/// iterations) cannot overflow the i32 intermediate computation under
+/// `debug-assertions`. Spec-compliant inputs are bit-identical because
+/// the result is clamped back to i16 before storage in `MsState`.
 fn ms_simulate_nibble(st: &MsState, nibble: u8) -> i16 {
-    let signed = ((nibble as i32) ^ 8) - 8;
-    let predicted = (st.sample1 * st.coef1 + st.sample2 * st.coef2) >> 8;
-    clamp_i16(predicted + signed * st.delta)
+    let signed = ((nibble as i64) ^ 8) - 8;
+    let term1 = (st.sample1 as i64).saturating_mul(st.coef1 as i64);
+    let term2 = (st.sample2 as i64).saturating_mul(st.coef2 as i64);
+    let predicted = term1.saturating_add(term2) >> 8;
+    let delta = signed.saturating_mul(st.delta as i64);
+    clamp_i16(predicted.saturating_add(delta))
 }
 
 /// Advance `st` exactly as the decoder would after emitting `out` from
 /// `nibble`. Splits the decoder step so the encoder can reuse the
 /// simulate-then-advance pattern in its search loop.
+///
+/// Mirrors the same overflow-safe arithmetic used by the decoder
+/// (`ms::decode_nibble` lifted to i64 in the previous round): the
+/// `MS_ADAPTATION[i] * delta` product can grow past i32::MAX after a
+/// few search iterations on adversarial PCM, so the multiplication is
+/// performed in i64 with saturating arithmetic and the result is
+/// clamped to i32 before being stored back into `delta`. The minimum
+/// of 16 is preserved per the spec.
 fn ms_advance(st: &mut MsState, nibble: u8, out: i16) {
     st.sample2 = st.sample1;
     st.sample1 = out as i32;
-    let mut d = (MS_ADAPTATION[nibble as usize] * st.delta) >> 8;
+    let prod = (MS_ADAPTATION[nibble as usize] as i64).saturating_mul(st.delta as i64);
+    let mut d = (prod >> 8).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     if d < 16 {
         d = 16;
     }

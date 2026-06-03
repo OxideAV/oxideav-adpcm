@@ -16,8 +16,10 @@ cargo-fuzz = true
 #
 # What it does NOT do is coverage-guided exploration of the nibble
 # stream and block-header product space. This libfuzzer harness fills
-# that other half:
+# that other half — one decode-side target + one encode-side target
+# per variant family:
 #
+# Decode side (per-variant `decode_block` / `decode_packet`):
 # - `decode_packet_ms`  — every block size + header + body byte triple
 #   the MS-ADPCM decoder accepts.
 # - `decode_packet_ima_wav` — same for the IMA-ADPCM WAV variant
@@ -28,12 +30,26 @@ cargo-fuzz = true
 #   stream-oriented decoders fed against a fuzz-derived nibble
 #   stream + state seed.
 #
+# Encode side (per-variant `encode_block` / `encode_packet` — added
+# round 229 to mirror the decode-side coverage):
+# - `encode_packet_ms` — every PCM input × block-size pair the
+#   MS-ADPCM block encoder accepts (`encoder::encode_block`).
+# - `encode_packet_ima_wav` — same for IMA-ADPCM-WAV
+#   (`encoder::ima_encode_block`); 1..=8 channels.
+# - `encode_packet_ima_qt` — fixed 64-samples-per-channel QT block
+#   encoder (`encoder::ima_qt_encode_block`), exercising the mean-|Δ|
+#   step-index heuristic on adversarial PCM.
+# - `encode_packet_stream` — Yamaha-A / Yamaha-B / Dialogic-VOX
+#   stream-oriented encoders driven against a fuzz-derived PCM stream
+#   + state seed (both nibble orders for Dialogic, both 12-bit
+#   widenings for ADPCM-A).
+#
 # Targets are independent so cargo-fuzz can prioritise corpus per
 # variant. None of them touches the registry path — every entry
-# point is the per-variant `decode_packet` / `decode_block` helper
-# already covered by the in-tree fuzz harness, so a crash here is
-# a structural bug in the per-variant decoder, not in the
-# registry-routing glue.
+# point is the per-variant `decode_packet` / `decode_block` (or
+# `encode_packet` / `encode_block`) helper already covered by the
+# in-tree fuzz harness, so a crash here is a structural bug in the
+# per-variant codec, not in the registry-routing glue.
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -70,5 +86,29 @@ doc = false
 [[bin]]
 name = "decode_packet_stream"
 path = "fuzz_targets/decode_packet_stream.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_packet_ms"
+path = "fuzz_targets/encode_packet_ms.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_packet_ima_wav"
+path = "fuzz_targets/encode_packet_ima_wav.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_packet_ima_qt"
+path = "fuzz_targets/encode_packet_ima_qt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_packet_stream"
+path = "fuzz_targets/encode_packet_stream.rs"
 test = false
 doc = false

@@ -74,8 +74,35 @@ field was a large signed-i16 value could overflow the
 `MS_ADAPTATION[i] * delta` i32 multiplication after a handful of
 iterations. The recurrence now runs in i64 with saturating
 multiplication and a final clamp back to i32 — spec-compliant inputs
-are bit-identical (the existing ffmpeg-oracle round-trip tests still
-pass) and hostile ones emit bounded samples instead of panicking.
+are bit-identical (the existing oracle round-trip tests still pass)
+and hostile ones emit bounded samples instead of panicking.
+
+Encoder-side robustness is exercised by a sibling
+`tests/encoder_fuzz.rs` suite (17 deterministic never-panic tests
+across all six variants — adversarial PCM, off-size sample counts,
+out-of-spec encoder-state seeds, plus a registry-level pass covering
+zero-length frames + random-byte streams through `send_frame` +
+`flush`). That harness surfaced two latent panics carried over from
+the original encoder shape:
+
+- **MS-ADPCM encoder i32 overflow** in `ms_advance` /
+  `ms_simulate_nibble`. The `MS_ADAPTATION[n] * delta` product (mirror
+  of the decoder bug already fixed in the prior round) and the
+  `sample1 * coef1 + sample2 * coef2` predictor sum could overflow
+  i32 when the encoder's search loop drove `delta` into the millions
+  on adversarial PCM. Both products now run in i64 with saturating
+  multiplication and a final clamp back to i16 / i32 storage — the
+  encoder's existing round-trip tests are bit-identical, and the new
+  fuzz tests no longer panic.
+- **Yamaha ADPCM-A index-out-of-bounds** in `decode_nibble` /
+  `encode_sample`. A negative `step_index` field on a caller-supplied
+  `Channel` (the fuzz harness threads adversarial state directly into
+  this struct, mimicking long-stream resumption) was used as `usize`
+  to index `YAMAHA_A_STEP_SIZE`, wrapping to a huge index and
+  panicking. Both functions now clamp `step_index` + `acc` to their
+  spec ranges on entry — identical to the post-update clamp the same
+  function applies on the way out, so the recurrence is unaffected
+  for any well-shaped stream.
 
 ## Benchmarks
 
@@ -115,12 +142,17 @@ hot paths:
 | `decode_packet_ima_wav` | `oxideav_adpcm::ima_wav::decode_block` |
 | `decode_packet_ima_qt` | `oxideav_adpcm::ima_qt::decode_block` |
 | `decode_packet_stream` | Yamaha-A / Yamaha-B / Dialogic-VOX `decode_packet` (variant + state seed picked from the first 10 fuzz bytes) |
+| `encode_packet_ms` | `oxideav_adpcm::encoder::encode_block` (PCM in, MS-ADPCM block out; block size derived from the first 3 fuzz bytes) |
+| `encode_packet_ima_wav` | `oxideav_adpcm::encoder::ima_encode_block` (1..=8 channels; block size derived from the first 3 fuzz bytes) |
+| `encode_packet_ima_qt` | `oxideav_adpcm::encoder::ima_qt_encode_block` (fixed 64-samples-per-channel block; exercises the mean-\|Δ\| step-index heuristic against adversarial PCM) |
+| `encode_packet_stream` | Yamaha-A / Yamaha-B / Dialogic-VOX `encode_packet` (both nibble orders for Dialogic; both 12-bit widenings for ADPCM-A; state seed picked from the first 10 fuzz bytes) |
 
 Each target's contract is the same as the in-tree fuzz tests' — every
-byte slice must produce either `Ok(samples)` or `Err(Error::…)`; never
-panic, debug-overflow, OOM, or index out of bounds. The stream-oriented
-target additionally seeds out-of-spec predictor + step-index values so
-the input-clamp paths fire on cold start.
+byte slice must produce either `Ok(samples)` or `Err(Error::…)` (or, for
+the stream encoders, a finite `Vec<u8>`); never panic, debug-overflow,
+OOM, or index out of bounds. The stream-oriented targets additionally
+seed out-of-spec predictor + step-index values so the input-clamp paths
+fire on cold start.
 
 Run an individual target with a nightly toolchain:
 

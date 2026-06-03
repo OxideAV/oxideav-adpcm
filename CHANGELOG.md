@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Encoder fuzz / never-panic coverage** (`tests/encoder_fuzz.rs` +
+  4 new `fuzz/` libfuzzer targets) — symmetric counterpart to the
+  existing decoder fuzz suite. The in-tree harness adds 17
+  deterministic tests across every variant: adversarial PCM
+  (`i16::MIN/MAX`, alternating ± clips, DC), randomised block-size
+  + sample-count sweeps for the block-oriented variants, out-of-spec
+  encoder-state seeds (negative `step_index`, out-of-range
+  `predictor` / `acc`) for the stream-oriented variants, plus a
+  registry-level pass covering zero-length frames + random-byte
+  streams through `Encoder::send_frame` + `flush`. The cargo-fuzz
+  side adds four new libfuzzer targets (`encode_packet_ms`,
+  `encode_packet_ima_wav`, `encode_packet_ima_qt`,
+  `encode_packet_stream`) so a long-running fuzz job can do
+  coverage-guided exploration of the encoder hot path against
+  arbitrary PCM input + (for the stream variants) arbitrary state
+  seeds. Contract: every PCM + parameter tuple produces either
+  `Ok(Vec<u8>)` or `Err(Error::Invalid | Error::Unsupported)`
+  (block-oriented) or a finite `Vec<u8>` (stream-oriented); never
+  panic, debug-overflow, OOM, or index out of bounds.
+
+### Fixed
+
+- **MS-ADPCM encoder integer overflow on adversarial PCM.** The
+  encoder's simulate-then-advance search loop multiplied
+  `MS_ADAPTATION[n] * delta` (and `sample1 * coef1 + sample2 *
+  coef2`) in i32 — same shape as the decoder bug fixed in the prior
+  round. On adversarial input (e.g. alternating `i16::MIN` /
+  `i16::MAX`) the search can drive `delta` past 1 M after a handful
+  of iterations, overflowing the i32 product. Lifted the recurrence
+  to i64 with saturating multiplication and a final clamp back to
+  i32 / i16 storage. Spec-compliant streams produce bit-identical
+  output (the existing round-trip + oracle tests still pass);
+  adversarial PCM emits bounded `Ok` blocks instead of panicking
+  under `debug-assertions`. Surfaced by
+  `tests/encoder_fuzz.rs::ms_encoder_extreme_pcm_never_panics`.
+- **Yamaha ADPCM-A `step_index` index-out-of-bounds on adversarial
+  encoder state.** `decode_nibble` and `encode_sample` indexed
+  `YAMAHA_A_STEP_SIZE` with `state.step_index as usize` directly —
+  a caller-supplied `Channel` (such as a long-stream resume) carrying
+  a negative `step_index` wrapped to a huge unsigned index and
+  panicked. Both functions now clamp `step_index` (and `acc`) to
+  their tabulated spec ranges on entry, identical to the
+  post-update clamp the same function already applies on the way
+  out. Round-trip + bit-equivalence with the prior nibble
+  trajectories is preserved (verified by all existing encoder /
+  decoder tests). Surfaced by
+  `tests/encoder_fuzz.rs::yamaha_a_encoder_extreme_state_seed_never_panics`.
+
+### Added (prior depth-mode work)
+
 - **Coverage-guided fuzz harness** (`fuzz/`) — depth-mode complement
   to the existing in-tree deterministic `tests/decoder_fuzz.rs`
   structured-malformation suite. New cargo-fuzz crate at
