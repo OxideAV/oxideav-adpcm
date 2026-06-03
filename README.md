@@ -101,6 +101,34 @@ check inner loops, predictor-fold rewrites) — the numbers themselves
 aren't pinned to any specific microarchitecture, only their relative
 ratios across crate versions.
 
+## Coverage-guided fuzzing
+
+In addition to the deterministic, hand-enumerated `tests/decoder_fuzz.rs`
+suite (run on every `cargo test`), a [`cargo-fuzz`][cargo-fuzz]
+harness under `fuzz/` exposes four libfuzzer targets so a long-running
+fuzz job can do coverage-guided exploration of the per-variant decode
+hot paths:
+
+| Target | Entry point under test |
+|--------|------------------------|
+| `decode_packet_ms` | `oxideav_adpcm::ms::decode_block` |
+| `decode_packet_ima_wav` | `oxideav_adpcm::ima_wav::decode_block` |
+| `decode_packet_ima_qt` | `oxideav_adpcm::ima_qt::decode_block` |
+| `decode_packet_stream` | Yamaha-A / Yamaha-B / Dialogic-VOX `decode_packet` (variant + state seed picked from the first 10 fuzz bytes) |
+
+Each target's contract is the same as the in-tree fuzz tests' — every
+byte slice must produce either `Ok(samples)` or `Err(Error::…)`; never
+panic, debug-overflow, OOM, or index out of bounds. The stream-oriented
+target additionally seeds out-of-spec predictor + step-index values so
+the input-clamp paths fire on cold start.
+
+Run an individual target with a nightly toolchain:
+
+    cd crates/oxideav-adpcm/fuzz
+    cargo +nightly fuzz run decode_packet_ms
+
+[cargo-fuzz]: https://rust-fuzz.github.io/book/cargo-fuzz.html
+
 ## Specs followed
 
 Each variant was implemented from its **public normative spec**, not from any

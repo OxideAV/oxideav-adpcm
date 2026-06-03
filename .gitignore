@@ -1,11 +1,22 @@
 /target
 
 # Rust build lockfile — this crate is a library, so we do
-# not commit Cargo.lock. See https://doc.rust-lang.org/cargo/faq.html#why-do-binaries-have-cargolock-in-version-control-but-not-libraries
-Cargo.lock
+# not commit Cargo.lock at the crate root. See
+# https://doc.rust-lang.org/cargo/faq.html#why-do-binaries-have-cargolock-in-version-control-but-not-libraries
+# Note: anchored to the crate root so `fuzz/Cargo.lock` (conventional
+# for a cargo-fuzz binary crate, which is a separate non-published
+# workspace member) can be committed.
+/Cargo.lock
 
 # Heavy test fixtures — downloaded at test time (see tests/README.md).
 tests/fixtures/*.avi
 tests/fixtures/*.wav
 tests/fixtures/*.mov
 tests/fixtures/*.pcm
+
+# Cargo-fuzz build + corpus artefacts (the harness sources under
+# `fuzz/fuzz_targets/` ARE committed; build artefacts and accumulated
+# corpora / crash artefacts are not).
+fuzz/target
+fuzz/corpus/*/
+fuzz/artifacts

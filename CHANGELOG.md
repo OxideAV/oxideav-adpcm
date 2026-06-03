@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Coverage-guided fuzz harness** (`fuzz/`) — depth-mode complement
+  to the existing in-tree deterministic `tests/decoder_fuzz.rs`
+  structured-malformation suite. New cargo-fuzz crate at
+  `crates/oxideav-adpcm/fuzz/` with four libfuzzer targets:
+  `decode_packet_ms` (drives `ms::decode_block` with a fuzz-picked
+  channel count + arbitrary header/body bytes), `decode_packet_ima_wav`
+  (same shape for `ima_wav::decode_block`, 1..=8 channels),
+  `decode_packet_ima_qt` (the 34-byte/channel Apple QuickTime path
+  through `ima_qt::decode_block`), and `decode_packet_stream` (one
+  fuzz byte picks the variant, the next picks the channel count, the
+  next 8 seed the predictor + step-index — exercising Yamaha
+  ADPCM-A / ADPCM-B and Dialogic VOX in both `HiFirst`/`LoFirst`
+  nibble orders and `Wide16`/`Native12` output widths). Contract is
+  "every byte slice returns `Ok` or `Err`, never panics / debug-
+  overflows / OOMs". The fuzz crate is a self-contained workspace
+  member (`[workspace] members = ["."]`) so libfuzzer's nightly
+  requirement doesn't leak into the umbrella resolver; `fuzz/target`,
+  `fuzz/corpus/*/`, and `fuzz/artifacts` are gitignored while the
+  target sources under `fuzz/fuzz_targets/` are committed. Run with
+  `cd crates/oxideav-adpcm/fuzz && cargo +nightly fuzz run <target>`.
+  Closes the "saturated → fuzz/bench/profile" memo's coverage-guided
+  exploration slot — every variant has shipped feature-complete
+  decoder + encoder pairs (README "Status" table all `yes/yes`),
+  Criterion benches landed last round, and structured-malformation
+  in-tree fuzz already covers hand-enumerated cases; this adds the
+  long-running coverage-guided exploration layer on top.
+
 - **Criterion bench harness** (`benches/decode.rs`) — depth-mode
   benchmark coverage for the per-block / per-packet decode hot path
   across all six ADPCM variants. 11 scenarios: MS-ADPCM mono

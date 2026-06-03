@@ -1,0 +1,74 @@
+[package]
+name = "oxideav-adpcm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# In-tree `tests/decoder_fuzz.rs` already drives every variant through a
+# deterministic in-process LCG + the trait-level `Decoder::send_packet`
+# / `receive_frame` path. That harness is fast (it runs in `cargo
+# test`), reproducible, and catches structural malformation classes
+# enumerated by hand (truncated prefixes, out-of-spec predictor
+# bytes, body-misalignment, …).
+#
+# What it does NOT do is coverage-guided exploration of the nibble
+# stream and block-header product space. This libfuzzer harness fills
+# that other half:
+#
+# - `decode_packet_ms`  — every block size + header + body byte triple
+#   the MS-ADPCM decoder accepts.
+# - `decode_packet_ima_wav` — same for the IMA-ADPCM WAV variant
+#   (`oxideav_adpcm::ima_wav::decode_block`).
+# - `decode_packet_ima_qt` — the fixed 34-byte/channel Apple
+#   QuickTime variant.
+# - `decode_packet_stream` — Yamaha-A / Yamaha-B / Dialogic-VOX
+#   stream-oriented decoders fed against a fuzz-derived nibble
+#   stream + state seed.
+#
+# Targets are independent so cargo-fuzz can prioritise corpus per
+# variant. None of them touches the registry path — every entry
+# point is the per-variant `decode_packet` / `decode_block` helper
+# already covered by the in-tree fuzz harness, so a crash here is
+# a structural bug in the per-variant decoder, not in the
+# registry-routing glue.
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-adpcm]
+path = ".."
+
+# Prevent the cargo-fuzz crate from being pulled into the umbrella
+# workspace; libfuzzer-sys needs nightly + has its own deps that
+# don't belong in the umbrella resolve graph.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode_packet_ms"
+path = "fuzz_targets/decode_packet_ms.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_packet_ima_wav"
+path = "fuzz_targets/decode_packet_ima_wav.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_packet_ima_qt"
+path = "fuzz_targets/decode_packet_ima_qt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "decode_packet_stream"
+path = "fuzz_targets/decode_packet_stream.rs"
+test = false
+doc = false
