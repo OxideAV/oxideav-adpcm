@@ -54,6 +54,40 @@ leading-edge transient inherent to per-block re-seeding, the IMA-QT
 encoder picks the initial step index from the mean |Δ| of the first
 samples in each block (rather than always seeding at 0).
 
+## Typed variant accessor
+
+For callers that already know which ADPCM variant they want — a fixture
+loader pinning ADPCM-A; a WAV demuxer that has already parsed
+`WAVEFORMATEX::wFormatTag`; a unit test addressing exactly one decoder
+— the crate re-exports the dispatch enum at the crate root as
+[`oxideav_adpcm::Variant`] together with a small inspection surface:
+
+```rust
+use oxideav_adpcm::{Variant, CODEC_ID_MS};
+use oxideav_core::CodecId;
+
+// Round-trip a codec id through the typed enum.
+let v = Variant::from_codec_id(&CodecId::new(CODEC_ID_MS)).unwrap();
+assert_eq!(v.codec_id(), CODEC_ID_MS);
+
+// Container-layer tag inspection without re-typing the dispatch ladder.
+assert_eq!(Variant::Ms.wave_format_tag(),     Some(0x0002));
+assert_eq!(Variant::ImaWav.wave_format_tag(), Some(0x0011));
+assert_eq!(Variant::Yamaha.wave_format_tag(), Some(0x0020));
+assert_eq!(Variant::ImaQt.fourcc(),           Some(*b"ima4"));
+
+// Iterate every supported variant — exhaustiveness audits, table-
+// driven registration tests, configuration UIs.
+for &v in Variant::all() {
+    println!("{} ({:?})", v.codec_id(), v);
+}
+```
+
+A unit-test in `src/lib.rs` pins bit-for-bit agreement between
+`Variant::wave_format_tag()` / `Variant::fourcc()` and the tags that
+`register_codecs` actually wires into the registry, so a future
+ADPCM variant addition has to update both surfaces in lockstep.
+
 ## Robustness
 
 `tests/decoder_fuzz.rs` enumerates structured-malformation coverage

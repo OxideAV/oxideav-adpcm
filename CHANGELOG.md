@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed `Variant` accessor surface.** The decoder-dispatch enum
+  `decoder::Variant` is now re-exported at the crate root and gains
+  a small inspection API so callers that already know their codec
+  do not have to round-trip through a `&str`:
+  * `Variant::all()` — `&'static [Variant]` over every supported
+    variant in declaration order.
+  * `Variant::codec_id()` — canonical `adpcm_*` id string (matches
+    the existing `CODEC_ID_*` constants).
+  * `Variant::from_codec_id(&CodecId)` (newly public) — `Option<Variant>`
+    parse of the id back to the typed enum.
+  * `Variant::wave_format_tag()` — `Option<u16>` returning `0x0002`
+    (MS), `0x0011` (IMA-WAV) or `0x0020` (Yamaha-B); `None` for the
+    three tagless variants (IMA-QT addresses via FourCC; ADPCM-A and
+    Dialogic VOX are chip-internal / headerless).
+  * `Variant::fourcc()` — `Option<[u8;4]>` returning `b"ima4"` for
+    ADPCM-IMA-QT and `None` for every other variant.
+  Five unit tests pin the round-trip (`codec_id()` → `from_codec_id()`),
+  rejection of non-ADPCM ids, exhaustiveness of `Variant::all()`
+  against the `CODEC_ID_*` constants, and bit-for-bit agreement
+  between the typed tag accessors and what `register_codecs` actually
+  wires into the registry — so any future ADPCM variant addition has
+  to update both surfaces in lockstep.
 - **Encoder fuzz / never-panic coverage** (`tests/encoder_fuzz.rs` +
   4 new `fuzz/` libfuzzer targets) — symmetric counterpart to the
   existing decoder fuzz suite. The in-tree harness adds 17

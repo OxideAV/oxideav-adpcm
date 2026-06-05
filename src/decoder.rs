@@ -10,6 +10,29 @@ use oxideav_core::Decoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
 /// Which of the supported variants this instance implements.
+///
+/// `Variant` is the typed counterpart of the `adpcm_*` codec-id string
+/// table — callers that already know which variant they want (a fixture
+/// loader pinning ADPCM-A; a unit test addressing one specific decoder;
+/// a higher-level container demuxer that has already parsed the
+/// WAVEFORMATEX `wFormatTag` or QuickTime fourcc) can construct it
+/// directly and avoid round-tripping through a `&str`.
+///
+/// The accessors form a small inspection surface so the [`Variant`] enum
+/// is interchangeable with the canonical id string + container tag without
+/// re-typing the dispatch ladder in user code:
+///
+/// - [`Variant::codec_id`] — canonical `adpcm_*` id string (matches the
+///   `CODEC_ID_*` constants in [`crate`]).
+/// - [`Variant::from_codec_id`] — parse from a [`CodecId`] (None on
+///   unknown ids).
+/// - [`Variant::wave_format_tag`] — `WAVEFORMATEX::wFormatTag` for the
+///   four variants that carry one; `None` for the three that don't
+///   (QuickTime / ADPCM-A / VOX).
+/// - [`Variant::fourcc`] — QuickTime / MP4 sample-entry FourCC for
+///   ADPCM-IMA-QT; `None` for everything else.
+/// - [`Variant::all`] — slice of every supported variant, suitable for
+///   `for v in Variant::all() { … }` iteration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Variant {
     Ms,
@@ -21,7 +44,37 @@ pub enum Variant {
 }
 
 impl Variant {
-    fn from_codec_id(id: &CodecId) -> Option<Self> {
+    /// Every supported [`Variant`] in declaration order — handy for
+    /// table-driven registration tests, exhaustiveness audits, and
+    /// container layers that probe codec parameters across the whole
+    /// family.
+    pub const fn all() -> &'static [Variant] {
+        &[
+            Variant::Ms,
+            Variant::ImaWav,
+            Variant::ImaQt,
+            Variant::Yamaha,
+            Variant::YamahaA,
+            Variant::Dialogic,
+        ]
+    }
+
+    /// Canonical `adpcm_*` codec-id string for this variant. Always
+    /// equal to one of the `CODEC_ID_*` constants in [`crate`].
+    pub const fn codec_id(self) -> &'static str {
+        match self {
+            Variant::Ms => crate::CODEC_ID_MS,
+            Variant::ImaWav => crate::CODEC_ID_IMA_WAV,
+            Variant::ImaQt => crate::CODEC_ID_IMA_QT,
+            Variant::Yamaha => crate::CODEC_ID_YAMAHA,
+            Variant::YamahaA => crate::CODEC_ID_YAMAHA_A,
+            Variant::Dialogic => crate::CODEC_ID_DIALOGIC,
+        }
+    }
+
+    /// Parse a [`Variant`] from its canonical codec id. Returns `None`
+    /// if `id` does not match a known `adpcm_*` codec.
+    pub fn from_codec_id(id: &CodecId) -> Option<Self> {
         match id.as_str() {
             crate::CODEC_ID_MS => Some(Self::Ms),
             crate::CODEC_ID_IMA_WAV => Some(Self::ImaWav),
@@ -29,6 +82,34 @@ impl Variant {
             crate::CODEC_ID_YAMAHA => Some(Self::Yamaha),
             crate::CODEC_ID_YAMAHA_A => Some(Self::YamahaA),
             crate::CODEC_ID_DIALOGIC => Some(Self::Dialogic),
+            _ => None,
+        }
+    }
+
+    /// `WAVEFORMATEX::wFormatTag` for the variants that have a canonical
+    /// WAV / AVI tag assignment:
+    ///
+    /// - `Ms` → `0x0002` (`WAVE_FORMAT_ADPCM`).
+    /// - `ImaWav` → `0x0011` (`WAVE_FORMAT_DVI_ADPCM`).
+    /// - `Yamaha` → `0x0020` (`WAVE_FORMAT_YAMAHA_ADPCM`).
+    ///
+    /// `None` for ADPCM-IMA-QT (QuickTime addresses it via a fourcc),
+    /// ADPCM-A (chip-internal — no WAV assignment) and Dialogic VOX
+    /// (headerless — no WAV assignment).
+    pub const fn wave_format_tag(self) -> Option<u16> {
+        match self {
+            Variant::Ms => Some(0x0002),
+            Variant::ImaWav => Some(0x0011),
+            Variant::Yamaha => Some(0x0020),
+            Variant::ImaQt | Variant::YamahaA | Variant::Dialogic => None,
+        }
+    }
+
+    /// QuickTime / MP4 sample-entry FourCC. Only ADPCM-IMA-QT carries a
+    /// canonical FourCC (`ima4`); every other variant returns `None`.
+    pub const fn fourcc(self) -> Option<[u8; 4]> {
+        match self {
+            Variant::ImaQt => Some(*b"ima4"),
             _ => None,
         }
     }

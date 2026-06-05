@@ -55,6 +55,8 @@ pub mod yamaha_a;
 use oxideav_core::{CodecCapabilities, CodecId, CodecTag};
 use oxideav_core::{CodecInfo, CodecRegistry};
 
+pub use decoder::Variant;
+
 /// Canonical codec id for Microsoft ADPCM.
 pub const CODEC_ID_MS: &str = "adpcm_ms";
 /// Canonical codec id for Microsoft IMA ADPCM (WAV variant).
@@ -209,6 +211,79 @@ mod tests {
             p.channels = Some(1);
             reg.first_decoder(&p)
                 .unwrap_or_else(|e| panic!("make_decoder for {id}: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn variant_codec_id_round_trip() {
+        // Every variant's codec_id() string parses back to the same
+        // variant via from_codec_id() — the typed enum and the id-string
+        // table never drift.
+        for &v in Variant::all() {
+            let id = CodecId::new(v.codec_id());
+            let parsed = Variant::from_codec_id(&id)
+                .unwrap_or_else(|| panic!("from_codec_id({:?}) returned None", id));
+            assert_eq!(parsed, v, "round-trip mismatch for {:?}", v);
+        }
+    }
+
+    #[test]
+    fn variant_from_codec_id_rejects_unknown_ids() {
+        // A non-ADPCM codec id must not be misclassified.
+        for id in ["pcm_s16le", "mp3", "opus", "", "adpcm_unknown"] {
+            assert!(
+                Variant::from_codec_id(&CodecId::new(id)).is_none(),
+                "unknown id {id:?} mis-parsed as a Variant"
+            );
+        }
+    }
+
+    #[test]
+    fn variant_all_covers_every_known_codec_id() {
+        // Cross-check: the codec-id constants and `Variant::all()` are
+        // exhaustive in parallel.
+        let from_all: Vec<&'static str> = Variant::all().iter().map(|v| v.codec_id()).collect();
+        for id in [
+            CODEC_ID_MS,
+            CODEC_ID_IMA_WAV,
+            CODEC_ID_IMA_QT,
+            CODEC_ID_YAMAHA,
+            CODEC_ID_YAMAHA_A,
+            CODEC_ID_DIALOGIC,
+        ] {
+            assert!(
+                from_all.contains(&id),
+                "codec id {id} missing from Variant::all()"
+            );
+        }
+        assert_eq!(from_all.len(), 6, "Variant::all() drifted from 6 entries");
+    }
+
+    #[test]
+    fn variant_wave_format_tag_matches_registered_tag() {
+        // The variant's typed tag accessor must agree with what
+        // `register_codecs` actually wires into the registry.
+        for &v in Variant::all() {
+            match v.wave_format_tag() {
+                Some(0x0002) => assert_eq!(v, Variant::Ms),
+                Some(0x0011) => assert_eq!(v, Variant::ImaWav),
+                Some(0x0020) => assert_eq!(v, Variant::Yamaha),
+                Some(other) => panic!("unexpected wave_format_tag {other:#06x} on {v:?}"),
+                None => assert!(
+                    matches!(v, Variant::ImaQt | Variant::YamahaA | Variant::Dialogic),
+                    "{v:?} returned None from wave_format_tag but is not a tagless variant"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn variant_fourcc_only_set_for_quicktime_ima4() {
+        for &v in Variant::all() {
+            match v {
+                Variant::ImaQt => assert_eq!(v.fourcc(), Some(*b"ima4")),
+                other => assert_eq!(other.fourcc(), None, "{other:?} should have no fourcc"),
+            }
         }
     }
 
