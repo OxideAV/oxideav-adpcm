@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Encoder leading-edge transient reduced for MS-ADPCM and
+  IMA-ADPCM-WAV.** Both block-oriented encoders now seed their
+  per-block step state from the mean absolute first-difference of the
+  first 16 samples in each block, instead of using a fixed cold-start
+  value (`delta = 16` for MS, `step_index = 0` for IMA-WAV).
+  * **IMA-ADPCM-WAV** — same mean-|Δ| heuristic the IMA-ADPCM-QT
+    encoder already uses: `target_step ≈ mean_delta × 8 / 3`, then
+    pick the first IMA step-table entry ≥ that target. For a 22.05 kHz
+    440 Hz amplitude-12000 sine, round-trip RMS error against the
+    source drops from ~413 (mono) / ~634 (stereo) to ~88 / ~78 — a
+    79% / 88% reduction.
+  * **MS-ADPCM** — with the default predictor index 0 (coef1=256,
+    coef2=0) the decoder recurrence reduces to
+    `reconstructed = sample1 + signed_nibble × delta`, so seeding
+    `delta ≈ mean_|Δ| / 4` places typical-magnitude nibbles at the
+    midrange of the 16-candidate sweep. RMS error on the same sine
+    drops from ~271 / ~207 (mono / stereo) to ~100 / ~86 — a 63% / 59%
+    reduction. The seed is clamped to the spec-mandated [16, 16384]
+    range.
+  * Encoder fuzz / round-trip tests already in place all still pass;
+    the per-variant RMS bounds in `tests/encode_round_trip.rs` are
+    tightened from < 1000-1500 to < 250 to pin the improvement.
+
 ### Added
 
 - **Typed `Variant` accessor surface.** The decoder-dispatch enum

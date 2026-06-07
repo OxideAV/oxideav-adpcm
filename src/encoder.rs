@@ -208,15 +208,42 @@ pub fn encode_block(samples: &[i16], channels: usize, target_block_size: usize) 
     }; 2];
 
     // Seed each channel: sample2 = samples[0,ch], sample1 = samples[1,ch].
-    // Initial delta is a moderate value — too small and the first few
-    // nibbles can't reach the target; too large and quantisation noise
-    // dominates. 16 (the spec minimum) works well in practice for the
-    // unit step search, but the decoder always pre-saturates to 16 anyway
-    // so we pick a slightly higher seed for headroom.
+    //
+    // Initial delta is a moderate value. The decoder recurrence with
+    // predictor index 0 (coef1=256, coef2=0) reduces to
+    //     reconstructed = sample1 + signed_nibble * delta
+    // where `signed_nibble = (nibble ^ 8) - 8` ranges -8..=7. So for an
+    // input sample whose target deviates from `sample1` by ~|Δ| LSB, the
+    // search loop's best nibble picks a magnitude near |Δ|/delta. A
+    // delta in the range "|Δ| / 4" places typical values at a mid-range
+    // nibble (magnitude 4) which leaves headroom on both sides.
+    //
+    // Without this seed, the delta starts at the spec minimum of 16 and
+    // grows multiplicatively only through MS_ADAPTATION; for a
+    // high-amplitude bandlimited signal the first half-dozen nibbles
+    // cannot track the target, producing a large leading-edge transient.
+    // Estimating the seed from |sample[i+1] - sample[i]| over the first
+    // few samples in the block costs O(few) and is bounded.
+    //
+    // The seed inputs are taken from the per-channel sample axis. We
+    // cap probes at `min(16, samples_per_channel - 1)` to keep the
+    // estimate local to the leading edge.
+    let probe = (samples_per_channel.saturating_sub(1)).clamp(1, 16);
     for ch in 0..channels {
         states[ch].sample2 = samples[ch] as i32;
         states[ch].sample1 = samples[channels + ch] as i32;
-        states[ch].delta = 16;
+        let mut acc: i64 = 0;
+        for i in 0..probe {
+            let s0 = samples[i * channels + ch] as i32;
+            let s1 = samples[(i + 1) * channels + ch] as i32;
+            acc += (s1 - s0).unsigned_abs() as i64;
+        }
+        let mean_abs_delta = (acc / probe as i64) as i32;
+        // delta ≈ mean_abs_delta / 4 places mid-range nibble at the
+        // typical step; floor at the spec minimum (16) and cap below
+        // i16::MAX (i32-storable but kept conservative).
+        let seed = (mean_abs_delta / 4).clamp(16, 16384);
+        states[ch].delta = seed;
     }
 
     let mut out = Vec::with_capacity(target_block_size);
@@ -461,10 +488,41 @@ pub fn ima_encode_block(samples: &[i16], channels: usize, block_size: usize) -> 
         )));
     }
 
+    // Seed step_index per channel from a |Δ|-of-leading-edge probe — the
+    // same heuristic used in `ima_qt_encode_block` (see commentary
+    // there). For a magnitude-4 nibble (lo bit only) the IMA decoder
+    // produces diff = step/8 + step/4 = 3*step/8 ≈ 0.375 * step, so a
+    // target step ≈ mean_delta * 8 / 3 places typical magnitudes near
+    // the middle of the available nibble range. Probes are bounded by
+    // the per-channel sample count; for a default-size block (505
+    // samples per channel) we look at the first 16. If the block holds
+    // fewer than 2 samples per channel the seed defaults to 0.
+    let probe = (samples_per_channel.saturating_sub(1)).min(16);
     let mut states: Vec<ImaState> = (0..channels)
-        .map(|ch| ImaState {
-            predictor: samples[ch] as i32,
-            step_index: 0,
+        .map(|ch| {
+            let mut step_index: i32 = 0;
+            if probe > 0 {
+                let mut acc: i64 = 0;
+                for i in 0..probe {
+                    let s0 = samples[i * channels + ch] as i32;
+                    let s1 = samples[(i + 1) * channels + ch] as i32;
+                    acc += (s1 - s0).unsigned_abs() as i64;
+                }
+                let mean_delta = (acc / probe as i64) as i32;
+                let target_step = (mean_delta as i64 * 8 / 3).max(7) as i32;
+                for (i, &s) in IMA_STEP_SIZE.iter().enumerate() {
+                    if s as i32 >= target_step {
+                        step_index = i as i32;
+                        break;
+                    }
+                    step_index = (IMA_STEP_SIZE.len() - 1) as i32;
+                }
+                step_index = step_index.clamp(0, 88);
+            }
+            ImaState {
+                predictor: samples[ch] as i32,
+                step_index,
+            }
         })
         .collect();
 

@@ -105,7 +105,10 @@ fn ms_mono_round_trip_via_registry() {
     // Encoder pads the tail to a full block; allow decoded.len() >= pcm.len().
     assert!(decoded.len() >= pcm.len());
     let rms = rms_error(&decoded, &pcm);
-    assert!(rms < 1000.0, "MS mono registry round-trip RMS {rms}");
+    // With the |Δ|-based `delta` seeding heuristic, RMS on a 22.05 kHz
+    // 440 Hz amp=12000 sine sits around 100. The bound below pins the
+    // improvement so a regression in the seed loop trips the test.
+    assert!(rms < 250.0, "MS mono registry round-trip RMS {rms}");
 }
 
 #[test]
@@ -113,7 +116,7 @@ fn ms_stereo_round_trip_via_registry() {
     let (pcm, decoded) = round_trip(CODEC_ID_MS, 2, 2000, 22050);
     assert!(decoded.len() >= pcm.len());
     let rms = rms_error(&decoded, &pcm);
-    assert!(rms < 1500.0, "MS stereo registry round-trip RMS {rms}");
+    assert!(rms < 250.0, "MS stereo registry round-trip RMS {rms}");
 }
 
 #[test]
@@ -121,7 +124,9 @@ fn ima_wav_mono_round_trip_via_registry() {
     let (pcm, decoded) = round_trip(CODEC_ID_IMA_WAV, 1, 2000, 22050);
     assert!(decoded.len() >= pcm.len());
     let rms = rms_error(&decoded, &pcm);
-    assert!(rms < 1500.0, "IMA-WAV mono registry round-trip RMS {rms}");
+    // With the mean-|Δ|-derived step_index seed (matching the IMA-QT
+    // encoder), RMS on a 22.05 kHz 440 Hz amp=12000 sine sits around 90.
+    assert!(rms < 250.0, "IMA-WAV mono registry round-trip RMS {rms}");
 }
 
 #[test]
@@ -129,7 +134,7 @@ fn ima_wav_stereo_round_trip_via_registry() {
     let (pcm, decoded) = round_trip(CODEC_ID_IMA_WAV, 2, 2000, 22050);
     assert!(decoded.len() >= pcm.len());
     let rms = rms_error(&decoded, &pcm);
-    assert!(rms < 1500.0, "IMA-WAV stereo registry round-trip RMS {rms}");
+    assert!(rms < 250.0, "IMA-WAV stereo registry round-trip RMS {rms}");
 }
 
 #[test]
