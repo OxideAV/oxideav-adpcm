@@ -55,7 +55,7 @@ pub mod yamaha_a;
 use oxideav_core::{CodecCapabilities, CodecId, CodecTag};
 use oxideav_core::{CodecInfo, CodecRegistry};
 
-pub use decoder::Variant;
+pub use decoder::{Shape, Variant};
 
 /// Canonical codec id for Microsoft ADPCM.
 pub const CODEC_ID_MS: &str = "adpcm_ms";
@@ -284,6 +284,114 @@ mod tests {
                 Variant::ImaQt => assert_eq!(v.fourcc(), Some(*b"ima4")),
                 other => assert_eq!(other.fourcc(), None, "{other:?} should have no fourcc"),
             }
+        }
+    }
+
+    #[test]
+    fn variant_shape_partitions_block_vs_stream() {
+        // Three block-oriented (WAV/AVI/QT — per-block header re-seed)
+        // and three stream-oriented (Yamaha-A/B + Dialogic VOX —
+        // headerless, predictor + step carry across packets) variants.
+        for &v in Variant::all() {
+            let shape = v.shape();
+            match v {
+                Variant::Ms | Variant::ImaWav | Variant::ImaQt => {
+                    assert_eq!(
+                        shape,
+                        Shape::BlockOriented,
+                        "{:?} is a block-oriented WAV/AVI/QT variant",
+                        v
+                    );
+                }
+                Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => {
+                    assert_eq!(
+                        shape,
+                        Shape::StreamOriented,
+                        "{:?} is a stream-oriented chip variant",
+                        v
+                    );
+                }
+            }
+        }
+        // Exactly 3 in each bucket — pins the partition against silent
+        // future drift.
+        let block = Variant::all()
+            .iter()
+            .filter(|v| v.shape() == Shape::BlockOriented)
+            .count();
+        let stream = Variant::all()
+            .iter()
+            .filter(|v| v.shape() == Shape::StreamOriented)
+            .count();
+        assert_eq!(block, 3, "expected 3 block-oriented variants, got {block}");
+        assert_eq!(
+            stream, 3,
+            "expected 3 stream-oriented variants, got {stream}"
+        );
+    }
+
+    #[test]
+    fn variant_max_channels_matches_factory_accept_reject() {
+        // For every variant, ask the decoder factory to build at the
+        // claimed maximum (and reject above it, where there is an upper
+        // bound) — keeps the typed accessor and the scattered factory
+        // checks in lockstep.
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        for &v in Variant::all() {
+            let id = CodecId::new(v.codec_id());
+            match v.max_channels() {
+                Some(max) => {
+                    // Factory must accept exactly `max` channels.
+                    let mut p = CodecParameters::audio(id.clone());
+                    p.sample_rate = Some(22_050);
+                    p.channels = Some(max);
+                    reg.first_decoder(&p).unwrap_or_else(|e| {
+                        panic!("{:?}: factory rejected claimed max {max}ch: {e:?}", v)
+                    });
+                    // And must reject `max + 1` channels.
+                    let mut p_over = CodecParameters::audio(id.clone());
+                    p_over.sample_rate = Some(22_050);
+                    p_over.channels = Some(max + 1);
+                    assert!(
+                        reg.first_decoder(&p_over).is_err(),
+                        "{:?}: factory accepted {}ch but max_channels() says {max}",
+                        v,
+                        max + 1
+                    );
+                }
+                None => {
+                    // Unbounded — confirm with a generously high count
+                    // (Yamaha-B carries sample-level round-robin).
+                    let mut p = CodecParameters::audio(id);
+                    p.sample_rate = Some(22_050);
+                    p.channels = Some(16);
+                    reg.first_decoder(&p).unwrap_or_else(|e| {
+                        panic!(
+                            "{:?}: max_channels()=None implies unbounded but factory rejected 16ch: {e:?}",
+                            v
+                        )
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn variant_max_channels_rejects_zero_for_every_variant() {
+        // Zero channels is nonsensical for every ADPCM variant — the
+        // factory rejects 0 across the board regardless of upper bound.
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        for &v in Variant::all() {
+            let mut p = CodecParameters::audio(CodecId::new(v.codec_id()));
+            p.sample_rate = Some(22_050);
+            p.channels = Some(0);
+            assert!(
+                reg.first_decoder(&p).is_err(),
+                "{:?}: factory accepted 0 channels",
+                v
+            );
         }
     }
 

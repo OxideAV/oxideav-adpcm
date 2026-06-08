@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Variant::shape()` + `Variant::max_channels()` typed accessors.**
+  Extends the existing typed `Variant` surface (`codec_id()` /
+  `from_codec_id()` / `wave_format_tag()` / `fourcc()` / `all()`)
+  with two more inspection points so container layers and
+  configuration UIs can branch on framing shape and channel-count
+  ceiling without re-typing the dispatch ladder in `make_decoder`:
+  * `Variant::shape() -> Shape` — `Shape::BlockOriented` for the
+    three WAV / AVI / QuickTime variants (MS, IMA-WAV, IMA-QT —
+    per-block header re-seeds predictor + step pointer; decoder is
+    memoryless across blocks and `Decoder::reset` does not need to
+    clear per-channel state), `Shape::StreamOriented` for the three
+    chip-stream variants (Yamaha-B / DELTA-T, Yamaha-A, Dialogic
+    VOX — no block framing, predictor and step pointer carry across
+    packet boundaries indefinitely so `Decoder::reset` must clear
+    per-channel state). The `Shape` enum is re-exported at the
+    crate root alongside `Variant`.
+  * `Variant::max_channels() -> Option<u16>` — `Some(2)` for MS /
+    IMA-QT / Dialogic, `Some(8)` for IMA-WAV (matches the
+    WAVEFORMATEX 8-channel speaker ceiling the `make_decoder`
+    factory already enforces), `Some(1)` for Yamaha-A
+    (YM2608/YM2610 rhythm channels are individually single-channel
+    streams), `None` for Yamaha-B (sample-level channel round-robin
+    over a contiguous nibble stream — no upper bound). The accessor
+    is the typed counterpart of the scattered `if channels > N`
+    branches in `decoder::make_decoder` so future channel-count
+    changes have to update both surfaces in lockstep.
+  Three new lib-side tests pin the partition (`variant_shape_*`:
+  3 + 3 partition fails loudly if a new variant lands without being
+  classified), the factory-accept boundary
+  (`variant_max_channels_matches_factory_accept_reject`: `max` ok,
+  `max + 1` `Err`, unbounded variants accept 16 channels), and the
+  zero-channel reject (`variant_max_channels_rejects_zero_for_every_variant`:
+  every variant rejects 0 channels regardless of upper bound).
+
 ### Changed
 
 - **Encoder leading-edge transient reduced for MS-ADPCM and

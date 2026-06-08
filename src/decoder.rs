@@ -31,6 +31,13 @@ use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, R
 ///   (QuickTime / ADPCM-A / VOX).
 /// - [`Variant::fourcc`] — QuickTime / MP4 sample-entry FourCC for
 ///   ADPCM-IMA-QT; `None` for everything else.
+/// - [`Variant::shape`] — `Shape::BlockOriented` for the WAV / AVI /
+///   QuickTime per-block-reseed variants, `Shape::StreamOriented` for
+///   the Yamaha / Dialogic per-channel-state-carries variants.
+/// - [`Variant::max_channels`] — maximum channel count the factory
+///   accepts for this variant (the [`Variant::Yamaha`] DELTA-T stream
+///   has no upper bound and returns `None`; every other variant has a
+///   hard cap derived from its container layer or chip topology).
 /// - [`Variant::all`] — slice of every supported variant, suitable for
 ///   `for v in Variant::all() { … }` iteration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -41,6 +48,42 @@ pub enum Variant {
     Yamaha,
     YamahaA,
     Dialogic,
+}
+
+/// On-wire framing shape of an ADPCM variant.
+///
+/// The ADPCM family splits along a stark line in how it carries its
+/// per-channel encoder state — predictor + step pointer — over the wire:
+///
+/// - **Block-oriented.** The header of each block re-seeds the predictor
+///   and step pointer from explicit fields; subsequent blocks do not
+///   depend on prior blocks. The decoder is *memoryless across blocks*
+///   and `Decoder::reset` does not need to clear per-channel state.
+///   Microsoft ADPCM (per-block 7-byte header per channel; Mc Gill §IV),
+///   IMA-ADPCM-WAV (4-byte header per channel), and Apple QuickTime IMA
+///   (2-byte big-endian preamble per channel — IMA spec §3.5.3 +
+///   QuickTime ima4 sample-entry layout) all take this shape.
+/// - **Stream-oriented.** No block framing — the byte stream is one
+///   contiguous nibble run, and the predictor + step pointer carry
+///   across packet boundaries indefinitely. `Decoder::reset` must clear
+///   per-channel state. Yamaha ADPCM-B / DELTA-T (Y8950 manual §I-4,
+///   AICA FQ8005 manual §I), Yamaha ADPCM-A (YM2608 / YM2610
+///   rhythm-channel chip-internal stream — no header), and OKI /
+///   Dialogic VOX (Dialogic 00-1366-001 §2 — `.vox` files are stored
+///   as a continuous bit stream with no header) all carry state
+///   forever.
+///
+/// The shape is observable in `Decoder::reset` semantics (block-oriented
+/// variants are no-ops for state because there is no state to keep, and
+/// stream-oriented variants must re-seed every per-channel `Channel`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// Each block carries its own predictor / step-pointer header; the
+    /// decoder re-seeds on every block boundary.
+    BlockOriented,
+    /// The byte stream is a continuous nibble run; predictor / step
+    /// pointer state carry across packet boundaries indefinitely.
+    StreamOriented,
 }
 
 impl Variant {
@@ -111,6 +154,52 @@ impl Variant {
         match self {
             Variant::ImaQt => Some(*b"ima4"),
             _ => None,
+        }
+    }
+
+    /// On-wire framing shape — see [`Shape`].
+    ///
+    /// The three WAV / AVI / QuickTime variants (MS, IMA-WAV, IMA-QT)
+    /// are [`Shape::BlockOriented`]: every block carries its own
+    /// predictor + step-pointer header and the decoder re-seeds per
+    /// block. The three chip-stream variants (Yamaha-B / DELTA-T,
+    /// Yamaha-A, Dialogic VOX) are [`Shape::StreamOriented`]:
+    /// predictor and step state persist across packet boundaries
+    /// indefinitely (so `Decoder::reset` must clear every per-channel
+    /// `Channel`).
+    pub const fn shape(self) -> Shape {
+        match self {
+            Variant::Ms | Variant::ImaWav | Variant::ImaQt => Shape::BlockOriented,
+            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => Shape::StreamOriented,
+        }
+    }
+
+    /// Maximum channel count the factory accepts for this variant.
+    ///
+    /// - `Variant::Ms` → `Some(2)` — Microsoft ADPCM is defined for
+    ///   mono and stereo only (Mc Gill §IV).
+    /// - `Variant::ImaWav` → `Some(8)` — IMA-WAV uses 4-byte-group
+    ///   per-channel interleave; eight matches the WAVEFORMATEX 8-channel
+    ///   speaker assignment ceiling the registry layer enforces.
+    /// - `Variant::ImaQt` → `Some(2)` — QuickTime `ima4` sample entries
+    ///   carry mono or stereo blocks (block-level interleave).
+    /// - `Variant::Yamaha` → `None` — DELTA-T is a continuous nibble
+    ///   stream with sample-level channel round-robin; the decoder
+    ///   factory accepts any positive count.
+    /// - `Variant::YamahaA` → `Some(1)` — YM2608 / YM2610 ADPCM-A
+    ///   rhythm channels are individually single-channel streams (each
+    ///   chip channel is its own decoder instance).
+    /// - `Variant::Dialogic` → `Some(2)` — the VOX nibble interleave
+    ///   convention (sample-level round-robin) is defined for mono and
+    ///   stereo only.
+    pub const fn max_channels(self) -> Option<u16> {
+        match self {
+            Variant::Ms => Some(2),
+            Variant::ImaWav => Some(8),
+            Variant::ImaQt => Some(2),
+            Variant::Yamaha => None,
+            Variant::YamahaA => Some(1),
+            Variant::Dialogic => Some(2),
         }
     }
 }

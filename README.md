@@ -105,6 +105,41 @@ A unit-test in `src/lib.rs` pins bit-for-bit agreement between
 `register_codecs` actually wires into the registry, so a future
 ADPCM variant addition has to update both surfaces in lockstep.
 
+The same surface also classifies the on-wire framing shape and the
+channel-count ceiling each variant accepts:
+
+```rust
+use oxideav_adpcm::{Shape, Variant};
+
+// Three block-oriented (WAV / AVI / QuickTime — per-block header re-seed)
+// vs three stream-oriented (Yamaha-A/B + Dialogic VOX — predictor and
+// step pointer carry across packets indefinitely) variants.
+assert_eq!(Variant::Ms.shape(),       Shape::BlockOriented);
+assert_eq!(Variant::ImaWav.shape(),   Shape::BlockOriented);
+assert_eq!(Variant::ImaQt.shape(),    Shape::BlockOriented);
+assert_eq!(Variant::Yamaha.shape(),   Shape::StreamOriented);
+assert_eq!(Variant::YamahaA.shape(),  Shape::StreamOriented);
+assert_eq!(Variant::Dialogic.shape(), Shape::StreamOriented);
+
+// Maximum channel count the factory accepts. None == unbounded
+// (Yamaha DELTA-T is sample-level round-robin).
+assert_eq!(Variant::Ms.max_channels(),       Some(2));
+assert_eq!(Variant::ImaWav.max_channels(),   Some(8));
+assert_eq!(Variant::ImaQt.max_channels(),    Some(2));
+assert_eq!(Variant::Yamaha.max_channels(),   None);
+assert_eq!(Variant::YamahaA.max_channels(),  Some(1));
+assert_eq!(Variant::Dialogic.max_channels(), Some(2));
+```
+
+Two more lib-side tests pin `Variant::shape()` against the
+block-vs-stream partition (3 in each bucket — fails loudly if a new
+variant lands without being slotted), and `Variant::max_channels()`
+against what the registry's `make_decoder` actually accepts / rejects
+at the boundary (`max` works, `max + 1` is `Err`; zero is `Err` for
+every variant). The `Shape` enum is re-exported at the crate root so
+container layers can branch on framing without round-tripping through
+the `Variant` enum.
+
 ## Robustness
 
 `tests/decoder_fuzz.rs` enumerates structured-malformation coverage
