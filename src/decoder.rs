@@ -38,6 +38,14 @@ use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, R
 ///   accepts for this variant (the [`Variant::Yamaha`] DELTA-T stream
 ///   has no upper bound and returns `None`; every other variant has a
 ///   hard cap derived from its container layer or chip topology).
+/// - [`Variant::header_bytes`] — fixed per-block header byte count for
+///   block-oriented variants (the spec-mandated value the decoder
+///   parses and the encoder emits before the nibble body); `None` for
+///   stream-oriented variants.
+/// - [`Variant::samples_per_block`] — per-channel sample count produced
+///   by one block of `block_bytes` for block-oriented variants;
+///   `None` for stream-oriented variants and for inputs that don't
+///   match the variant's framing constraints.
 /// - [`Variant::all`] — slice of every supported variant, suitable for
 ///   `for v in Variant::all() { … }` iteration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -200,6 +208,119 @@ impl Variant {
             Variant::Yamaha => None,
             Variant::YamahaA => Some(1),
             Variant::Dialogic => Some(2),
+        }
+    }
+
+    /// Fixed per-block header byte count for [`Shape::BlockOriented`]
+    /// variants, given a channel count.
+    ///
+    /// - `Variant::Ms` — `7 * channels` (per-channel predictor index
+    ///   byte + signed-i16 initial delta + two signed-i16 history
+    ///   samples).
+    /// - `Variant::ImaWav` — `4 * channels` (per-channel signed-i16
+    ///   predictor + u8 step index + reserved byte).
+    /// - `Variant::ImaQt` — `2 * channels` (per-channel big-endian u16
+    ///   preamble: 9-bit predictor + 7-bit step index).
+    ///
+    /// Returns `None` for [`Shape::StreamOriented`] variants
+    /// ([`Variant::Yamaha`], [`Variant::YamahaA`], [`Variant::Dialogic`])
+    /// which carry no block header — predictor + step state persist
+    /// across packets indefinitely. Also returns `None` if `channels`
+    /// is zero (no variant accepts a zero-channel layout).
+    pub const fn header_bytes(self, channels: u16) -> Option<usize> {
+        if channels == 0 {
+            return None;
+        }
+        let ch = channels as usize;
+        match self {
+            Variant::Ms => Some(7 * ch),
+            Variant::ImaWav => Some(4 * ch),
+            Variant::ImaQt => Some(2 * ch),
+            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
+        }
+    }
+
+    /// Per-channel sample count produced by a single block of
+    /// `block_bytes` for [`Shape::BlockOriented`] variants.
+    ///
+    /// The formulas are spec-derived:
+    ///
+    /// - `Variant::Ms` — `2 + (body_bytes * 2) / channels`, where
+    ///   `body_bytes = block_bytes - 7 * channels` (two history
+    ///   samples seed the output from the header, then each body
+    ///   nibble adds one sample). `block_bytes` must be ≥ the
+    ///   `7 * channels` header; the body must be a whole number of
+    ///   per-channel bytes.
+    /// - `Variant::ImaWav` — `1 + groups * 8`, where
+    ///   `groups = body_bytes / (4 * channels)` and the body length
+    ///   must be a whole number of 4-byte-per-channel interleave
+    ///   groups (one seed sample from the header predictor, then
+    ///   8 samples per channel per group).
+    /// - `Variant::ImaQt` — always [`ima_qt::QT_SAMPLES_PER_BLOCK`]
+    ///   (64); `block_bytes` must equal `QT_BLOCK_SIZE * channels`
+    ///   (34 * channels — the QuickTime `ima4` block layout is fixed).
+    ///
+    /// Returns `None` when:
+    /// - the variant is [`Shape::StreamOriented`] (no block framing);
+    /// - `channels` is zero or exceeds [`Self::max_channels`];
+    /// - `block_bytes` is smaller than the per-channel header
+    ///   ([`Self::header_bytes`]);
+    /// - the body length doesn't match the variant's framing
+    ///   constraint (per-channel multiple for MS, 4*channels group
+    ///   multiple for IMA-WAV, exact `34*channels` for IMA-QT).
+    ///
+    /// This is the same formula the per-block decoders parse with —
+    /// callers can size an output buffer up-front (`samples_per_block *
+    /// channels * 2` bytes of i16-LE) without round-tripping through
+    /// a probe-decode call.
+    pub const fn samples_per_block(self, channels: u16, block_bytes: usize) -> Option<usize> {
+        // Channel-count guard mirrors `make_decoder`.
+        if channels == 0 {
+            return None;
+        }
+        let ch = channels as usize;
+        let max = match self.max_channels() {
+            Some(m) => m as usize,
+            None => return None, // stream-oriented (Yamaha-B) has no block
+        };
+        if ch > max {
+            return None;
+        }
+        match self {
+            Variant::Ms => {
+                let header_len = 7 * ch;
+                if block_bytes < header_len {
+                    return None;
+                }
+                let body_len = block_bytes - header_len;
+                // Body must be a whole number of per-channel bytes;
+                // otherwise the per-channel nibble-pair count isn't an
+                // integer.
+                if body_len % ch != 0 {
+                    return None;
+                }
+                Some(2 + (body_len * 2) / ch)
+            }
+            Variant::ImaWav => {
+                let header_len = 4 * ch;
+                if block_bytes < header_len {
+                    return None;
+                }
+                let body_len = block_bytes - header_len;
+                let group_bytes = 4 * ch;
+                if body_len % group_bytes != 0 {
+                    return None;
+                }
+                Some(1 + (body_len / group_bytes) * 8)
+            }
+            Variant::ImaQt => {
+                // QT IMA: the block layout is fixed at 34 B per channel.
+                if block_bytes != crate::ima_qt::QT_BLOCK_SIZE * ch {
+                    return None;
+                }
+                Some(crate::ima_qt::QT_SAMPLES_PER_BLOCK)
+            }
+            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
         }
     }
 }

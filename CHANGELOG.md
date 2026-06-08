@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Variant::header_bytes()` + `Variant::samples_per_block()` typed
+  accessors.** Extends the typed `Variant` inspection surface with two
+  more spec-derived primitives so container and pipeline layers can
+  size block buffers without round-tripping through a probe-decode
+  call.
+  * `Variant::header_bytes(channels: u16) -> Option<usize>` —
+    `Some(7 * ch)` for MS (per-channel predictor index byte +
+    signed-i16 initial delta + two signed-i16 history samples),
+    `Some(4 * ch)` for IMA-WAV (per-channel signed-i16 predictor +
+    u8 step index + reserved byte), `Some(2 * ch)` for IMA-QT
+    (per-channel big-endian preamble: 9-bit predictor + 7-bit step
+    index). `None` for the three stream-oriented variants (Yamaha-B /
+    Yamaha-A / Dialogic VOX — no per-block header) and for zero
+    channels.
+  * `Variant::samples_per_block(channels: u16, block_bytes: usize)
+    -> Option<usize>` — the per-channel sample count one block of
+    `block_bytes` produces, using each variant's spec-derived
+    formula: MS → `2 + (body_bytes * 2) / channels` after subtracting
+    the `7 * channels` header; IMA-WAV → `1 + groups * 8` with
+    `groups = body_bytes / (4 * channels)`; IMA-QT → always 64 (the
+    `34 * channels` block layout is fixed). Returns `None` for
+    stream-oriented variants, zero / over-cap channels, blocks
+    shorter than the per-channel header, and bodies that don't match
+    the variant's per-channel / per-group / fixed-size framing
+    constraint. The accessor is `const` and exactly mirrors what the
+    per-block decoders (`ms::decode_block`, `ima_wav::decode_block`,
+    `ima_qt::decode_block`) parse — three new tests pin
+    bit-for-bit agreement against the actual decoded sample counts
+    across mono + stereo at minimum / single-group / multi-group
+    block sizes, plus a separate test enumerates every rejection
+    path (stream variants, zero / over-cap channels, short blocks,
+    body-misalignment, off-spec QT block sizes).
+
 - **`Variant::shape()` + `Variant::max_channels()` typed accessors.**
   Extends the existing typed `Variant` surface (`codec_id()` /
   `from_codec_id()` / `wave_format_tag()` / `fourcc()` / `all()`)

@@ -140,6 +140,41 @@ every variant). The `Shape` enum is re-exported at the crate root so
 container layers can branch on framing without round-tripping through
 the `Variant` enum.
 
+For block-oriented variants the typed surface also exposes header
+size and per-block sample count so a container layer can fill the
+WAV `nBlockAlign` / `nSamplesPerBlock` fields (or size an output
+buffer up front) without re-implementing the spec formulas:
+
+```rust
+use oxideav_adpcm::Variant;
+
+// Header byte count per block, given a channel count. None for the
+// three stream-oriented variants (no per-block header) and ch=0.
+assert_eq!(Variant::Ms.header_bytes(1),     Some(7));
+assert_eq!(Variant::Ms.header_bytes(2),     Some(14));
+assert_eq!(Variant::ImaWav.header_bytes(1), Some(4));
+assert_eq!(Variant::ImaWav.header_bytes(2), Some(8));
+assert_eq!(Variant::ImaQt.header_bytes(1),  Some(2));
+assert_eq!(Variant::Yamaha.header_bytes(1), None); // stream-oriented
+
+// Per-channel sample count for one block of `block_bytes`. Returns
+// None for stream-oriented variants, zero / over-cap channels,
+// blocks shorter than the per-channel header, body bytes that
+// aren't a whole number of per-channel groups, and any off-spec
+// QuickTime block size (must equal 34 * channels).
+assert_eq!(Variant::Ms.samples_per_block(1, 256),     Some(500));
+assert_eq!(Variant::ImaWav.samples_per_block(1, 256), Some(505));
+assert_eq!(Variant::ImaQt.samples_per_block(1, 34),   Some(64));
+assert_eq!(Variant::ImaQt.samples_per_block(2, 68),   Some(64));
+assert_eq!(Variant::Yamaha.samples_per_block(1, 256), None);
+```
+
+The accessor is `const fn`. A lib-side test seeds the corresponding
+per-block decoder with a zero-content block at each pin point and
+asserts the actual decoded sample count matches what the accessor
+predicts — silently changing one without the other now breaks the
+test.
+
 ## Robustness
 
 `tests/decoder_fuzz.rs` enumerates structured-malformation coverage
