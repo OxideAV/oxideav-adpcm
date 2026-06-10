@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Variant::block_size_bytes()` typed accessor — inverse of
+  `samples_per_block()`.** Given a desired per-channel sample count it
+  returns the block byte size (`nBlockAlign`) whose block decodes to
+  exactly that many samples per channel, so a muxer can choose a block
+  size for a target `nSamplesPerBlock` without re-deriving the framing
+  formula:
+  * `Variant::block_size_bytes(channels: u16, samples_per_channel:
+    usize) -> Option<usize>` — `Some(7 * ch + ((n - 2) * ch) / 2)` for
+    MS (header emits the first 2 samples; body adds 2 per byte per
+    channel), `Some(4 * ch + groups * 4 * ch)` with
+    `groups = (n - 1) / 8` for IMA-WAV (header predictor seeds 1
+    sample; 8 per channel per 4·ch-byte group), and the fixed
+    `34 * ch` for IMA-QT (the `ima4` block decodes a fixed 64 samples
+    per channel). `None` for the three stream-oriented variants, zero /
+    over-cap channels, sample counts below the header-only minimum, and
+    off-boundary counts that don't land on a whole-block edge (MS:
+    `(n - 2) * ch` must be even; IMA-WAV: `(n - 1)` a multiple of 8;
+    IMA-QT: `n` must equal 64). The accessor is `const` and exactly
+    inverts `samples_per_block` — two new tests pin the round-trip
+    (`block_size_bytes` → `samples_per_block` → same `n`, and the
+    derived size through the per-block decoder → same decoded length)
+    across mono + stereo, plus a rejection-path enumeration.
+
 - **`Variant::header_bytes()` + `Variant::samples_per_block()` typed
   accessors.** Extends the typed `Variant` inspection surface with two
   more spec-derived primitives so container and pipeline layers can
@@ -259,7 +282,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the delta-adapt + predictor recurrence to i64 with saturating
   multiplication, then clamp back to i32 (capped at `i32::MAX`).
   Spec-compliant streams produce bit-identical output (validated by
-  the existing ffmpeg-oracle round-trip tests); hostile inputs now
+  the existing oracle round-trip tests); hostile inputs now
   surface as bounded `Ok` decoded samples instead of a panic. Surfaced
   by the new `tests/decoder_fuzz.rs::ms_truncated_prefixes_never_panic_mono`
   coverage.

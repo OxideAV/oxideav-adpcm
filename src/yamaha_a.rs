@@ -15,10 +15,10 @@
 //! Provenance: the 49-entry step-size table is the independent-RE
 //! consensus of the NeoGeo Development Wiki / MAME / ymfm hardware
 //! reverse-engineering effort against real YM2608 / YM2610 silicon, as
-//! staged in `audio/adpcm/yamaha/yamaha-adpcm.md` §3. No FFmpeg or
-//! third-party general-purpose multimedia decoder source was read; the
-//! numeric tables transcribed in [`crate::tables`] are the only constants
-//! this module consumes.
+//! staged in `audio/adpcm/yamaha/yamaha-adpcm.md` §3. No third-party
+//! general-purpose multimedia decoder source was read; the numeric
+//! tables transcribed in [`crate::tables`] are the only constants this
+//! module consumes.
 //!
 //! # On-wire nibble layout
 //!

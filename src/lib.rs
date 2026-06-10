@@ -525,6 +525,109 @@ mod tests {
     }
 
     #[test]
+    fn variant_block_size_bytes_inverts_samples_per_block() {
+        use crate::{ima_qt, ima_wav, ms};
+        // For each block-oriented variant + channel count, sweep a range
+        // of valid per-channel sample counts, derive the block size with
+        // block_size_bytes(), and confirm:
+        //   (a) samples_per_block() of that size returns the same count
+        //       (the two accessors are exact inverses), and
+        //   (b) the per-block decoder seeded with a zero-content block of
+        //       that size produces exactly that many samples per channel.
+        // MS: header emits 2 samples; body adds 2 per byte per channel, so
+        // valid n are those where (n-2)*ch is even.
+        for ch in &[1u16, 2u16] {
+            let ch_u = *ch as usize;
+            for n in [2usize, 4, 6, 10, 32] {
+                if (n - 2) * ch_u % 2 != 0 {
+                    continue;
+                }
+                let b = Variant::Ms.block_size_bytes(*ch, n).unwrap();
+                assert_eq!(
+                    Variant::Ms.samples_per_block(*ch, b),
+                    Some(n),
+                    "MS ch={ch} n={n}: block_size_bytes/samples_per_block not inverse"
+                );
+                // Build a zero-content block of the derived size with valid
+                // per-channel headers (delta = 16, predictor index 0).
+                let mut block = vec![0u8; b];
+                for c in 0..ch_u {
+                    let off = ch_u + c * 2;
+                    block[off] = 16;
+                }
+                let pcm = ms::decode_block(&block, ch_u).unwrap();
+                assert_eq!(pcm.len() / ch_u, n, "MS ch={ch} n={n}: decode mismatch");
+            }
+        }
+        // IMA-WAV: header seeds 1 sample; each 4*ch group adds 8 per
+        // channel, so valid n are 1 + 8k.
+        for ch in &[1u16, 2u16] {
+            let ch_u = *ch as usize;
+            for groups in 0..=3usize {
+                let n = 1 + groups * 8;
+                let b = Variant::ImaWav.block_size_bytes(*ch, n).unwrap();
+                assert_eq!(
+                    Variant::ImaWav.samples_per_block(*ch, b),
+                    Some(n),
+                    "IMA-WAV ch={ch} n={n}: not inverse"
+                );
+                let block = vec![0u8; b];
+                let pcm = ima_wav::decode_block(&block, ch_u).unwrap();
+                assert_eq!(
+                    pcm.len() / ch_u,
+                    n,
+                    "IMA-WAV ch={ch} n={n}: decode mismatch"
+                );
+            }
+        }
+        // IMA-QT: only the fixed 64-sample block exists; block size is
+        // 34*ch.
+        for ch in &[1u16, 2u16] {
+            let b = Variant::ImaQt
+                .block_size_bytes(*ch, ima_qt::QT_SAMPLES_PER_BLOCK)
+                .unwrap();
+            assert_eq!(b, ima_qt::QT_BLOCK_SIZE * *ch as usize);
+            assert_eq!(
+                Variant::ImaQt.samples_per_block(*ch, b),
+                Some(ima_qt::QT_SAMPLES_PER_BLOCK)
+            );
+            let block = vec![0u8; b];
+            let pcm = ima_qt::decode_block(&block, *ch as usize).unwrap();
+            assert_eq!(pcm.len() / *ch as usize, ima_qt::QT_SAMPLES_PER_BLOCK);
+        }
+    }
+
+    #[test]
+    fn variant_block_size_bytes_rejects_bad_inputs() {
+        // Stream-oriented variants have no block framing — always None.
+        for &v in &[Variant::Yamaha, Variant::YamahaA, Variant::Dialogic] {
+            assert_eq!(v.block_size_bytes(1, 64), None, "{:?}: must be None", v);
+            assert_eq!(v.block_size_bytes(1, 0), None, "{:?}: must be None", v);
+        }
+        // Zero channels: None for every variant.
+        for &v in Variant::all() {
+            assert_eq!(v.block_size_bytes(0, 64), None, "{:?}: ch=0", v);
+        }
+        // Over-cap channels: None.
+        assert_eq!(Variant::Ms.block_size_bytes(3, 2), None);
+        assert_eq!(Variant::ImaWav.block_size_bytes(9, 1), None);
+        assert_eq!(Variant::ImaQt.block_size_bytes(3, 64), None);
+        // Below header-only minimum: None.
+        assert_eq!(Variant::Ms.block_size_bytes(1, 1), None);
+        assert_eq!(Variant::ImaWav.block_size_bytes(1, 0), None);
+        // Off-boundary sample counts.
+        // MS ch=1: (n-2) odd → no whole body byte. n=3 → body_nibbles=1.
+        assert_eq!(Variant::Ms.block_size_bytes(1, 3), None);
+        // IMA-WAV: (n-1) not a multiple of 8.
+        assert_eq!(Variant::ImaWav.block_size_bytes(1, 4), None);
+        assert_eq!(Variant::ImaWav.block_size_bytes(2, 10), None);
+        // IMA-QT: anything other than the fixed 64 samples.
+        assert_eq!(Variant::ImaQt.block_size_bytes(1, 63), None);
+        assert_eq!(Variant::ImaQt.block_size_bytes(1, 65), None);
+        assert_eq!(Variant::ImaQt.block_size_bytes(2, 32), None);
+    }
+
+    #[test]
     fn register_via_runtime_context_installs_codec_factory() {
         let mut ctx = oxideav_core::RuntimeContext::new();
         register(&mut ctx);

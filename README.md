@@ -45,7 +45,7 @@ stream-oriented encoders (where step state has to converge from cold
 start).
 
 Default block size is 256 bytes per channel for the MS and IMA-WAV
-encoders (matches the default ffmpeg emits at 22050 Hz mono); override
+encoders (a common WAV-container choice at 22050 Hz mono); override
 via `MsEncoder::set_block_size` / `ImaWavEncoder::set_block_size`
 before the first `send_frame` call. The IMA-QT encoder uses the
 spec-mandated 34-byte-per-channel block — there is no `set_block_size`
@@ -174,6 +174,35 @@ per-block decoder with a zero-content block at each pin point and
 asserts the actual decoded sample count matches what the accessor
 predicts — silently changing one without the other now breaks the
 test.
+
+The inverse direction is `Variant::block_size_bytes` — given a desired
+per-channel sample count it returns the block byte size (`nBlockAlign`)
+that decodes to exactly that many samples, so a muxer can pick a block
+size for a target `nSamplesPerBlock` without re-deriving the framing
+formula:
+
+```rust
+use oxideav_adpcm::Variant;
+
+// Inverse of samples_per_block: pick a block size for N samples/channel.
+assert_eq!(Variant::Ms.block_size_bytes(1, 500),     Some(256));
+assert_eq!(Variant::ImaWav.block_size_bytes(1, 505), Some(256));
+assert_eq!(Variant::ImaQt.block_size_bytes(1, 64),   Some(34));
+assert_eq!(Variant::ImaQt.block_size_bytes(2, 64),   Some(68));
+
+// None for stream-oriented variants and off-boundary sample counts
+// (MS needs (n-2)*ch even; IMA-WAV needs (n-1) divisible by 8; IMA-QT
+// is the fixed 64-sample block).
+assert_eq!(Variant::Ms.block_size_bytes(1, 3),       None);
+assert_eq!(Variant::ImaWav.block_size_bytes(1, 4),   None);
+assert_eq!(Variant::ImaQt.block_size_bytes(1, 63),   None);
+assert_eq!(Variant::Yamaha.block_size_bytes(1, 64),  None);
+```
+
+Two more lib-side tests pin the exact round-trip: every value returned
+by `block_size_bytes` feeds back through `samples_per_block` to the
+same sample count *and* through the per-block decoder to the same
+decoded length, plus a separate test enumerates the rejection paths.
 
 ## Robustness
 

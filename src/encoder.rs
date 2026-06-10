@@ -52,8 +52,8 @@
 //!
 //! Default block sizes can be overridden via the `block_size` field on
 //! the encoder before the first call to `send_frame`. The default of
-//! 256 bytes per channel matches what ffmpeg's `-c:a adpcm_ms` /
-//! `adpcm_ima_wav` emit by default at 22050 Hz mono.
+//! 256 bytes per channel is a common WAV-container choice at 22050 Hz
+//! mono and gives the nibble search a reasonable amortisation horizon.
 
 use std::collections::VecDeque;
 
@@ -68,8 +68,8 @@ use oxideav_core::{
 };
 
 /// Default per-channel block size in bytes for the WAV/AVI block-oriented
-/// variants. Chosen to match ffmpeg's default output at 22050 Hz mono and
-/// to give the search a reasonable amortisation horizon.
+/// variants. A common WAV-container choice at 22050 Hz mono that gives
+/// the nibble search a reasonable amortisation horizon.
 pub const DEFAULT_BLOCK_SIZE: usize = 256;
 
 // ---------------------------------------------------------------------------

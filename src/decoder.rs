@@ -46,6 +46,11 @@ use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, R
 ///   by one block of `block_bytes` for block-oriented variants;
 ///   `None` for stream-oriented variants and for inputs that don't
 ///   match the variant's framing constraints.
+/// - [`Variant::block_size_bytes`] — inverse of
+///   [`Variant::samples_per_block`]: the block byte count that encodes
+///   exactly N samples per channel (the WAV `nBlockAlign` for a chosen
+///   `nSamplesPerBlock`); `None` for stream-oriented variants and
+///   off-boundary sample counts.
 /// - [`Variant::all`] — slice of every supported variant, suitable for
 ///   `for v in Variant::all() { … }` iteration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -319,6 +324,96 @@ impl Variant {
                     return None;
                 }
                 Some(crate::ima_qt::QT_SAMPLES_PER_BLOCK)
+            }
+            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
+        }
+    }
+
+    /// Block byte count that encodes exactly `samples_per_channel` PCM
+    /// samples per channel for a [`Shape::BlockOriented`] variant — the
+    /// inverse of [`Self::samples_per_block`].
+    ///
+    /// A container layer that wants to emit fixed-duration blocks (the WAV
+    /// `nSamplesPerBlock` field) can size each block's `nBlockAlign`
+    /// up-front without re-deriving the per-variant framing formula. The
+    /// returned size always round-trips: for any
+    /// `Some(b) = block_size_bytes(ch, n)`,
+    /// `samples_per_block(ch, b) == Some(n)`.
+    ///
+    /// The formulas invert the spec-derived layouts:
+    ///
+    /// - `Variant::Ms` — `7 * channels + ((n - 2) * channels) / 2`. The
+    ///   header contributes the first 2 samples; every remaining sample
+    ///   is one body nibble, two nibbles per byte, so the body spans
+    ///   `(n - 2) / 2` bytes per channel. Requires `n >= 2` and
+    ///   `(n - 2) * channels` even (a whole number of body bytes).
+    /// - `Variant::ImaWav` — `4 * channels + groups * 4 * channels` with
+    ///   `groups = (n - 1) / 8`. The header predictor seeds 1 sample;
+    ///   each `4 * channels`-byte interleave group decodes 8 samples per
+    ///   channel. Requires `n >= 1` and `(n - 1)` divisible by 8.
+    /// - `Variant::ImaQt` — always `QT_BLOCK_SIZE * channels`
+    ///   (`34 * channels`); the QuickTime `ima4` block decodes a fixed
+    ///   [`ima_qt::QT_SAMPLES_PER_BLOCK`] (64) samples per channel, so
+    ///   `n` must equal 64.
+    ///
+    /// Returns `None` when:
+    /// - the variant is [`Shape::StreamOriented`] (no block framing);
+    /// - `channels` is zero or exceeds [`Self::max_channels`];
+    /// - `samples_per_channel` is below the variant's header-only minimum
+    ///   (2 for MS, 1 for IMA-WAV, the fixed 64 for IMA-QT);
+    /// - the requested sample count doesn't land on a whole-block
+    ///   boundary (MS: `(n - 2) * channels` must be even; IMA-WAV:
+    ///   `(n - 1)` must be a multiple of 8; IMA-QT: `n` must equal 64).
+    pub const fn block_size_bytes(
+        self,
+        channels: u16,
+        samples_per_channel: usize,
+    ) -> Option<usize> {
+        if channels == 0 {
+            return None;
+        }
+        let ch = channels as usize;
+        let max = match self.max_channels() {
+            Some(m) => m as usize,
+            None => return None, // stream-oriented (Yamaha-B) has no block
+        };
+        if ch > max {
+            return None;
+        }
+        match self {
+            Variant::Ms => {
+                // Header always emits the first 2 samples.
+                if samples_per_channel < 2 {
+                    return None;
+                }
+                let body_samples = samples_per_channel - 2;
+                // Body decodes 2 samples per byte per channel; the total
+                // body byte run must be a whole number of bytes.
+                let body_nibbles = body_samples * ch;
+                if body_nibbles % 2 != 0 {
+                    return None;
+                }
+                Some(7 * ch + body_nibbles / 2)
+            }
+            Variant::ImaWav => {
+                // Header predictor seeds 1 sample.
+                if samples_per_channel < 1 {
+                    return None;
+                }
+                let body_samples = samples_per_channel - 1;
+                // 8 samples per channel per 4*ch-byte group.
+                if body_samples % 8 != 0 {
+                    return None;
+                }
+                let groups = body_samples / 8;
+                Some(4 * ch + groups * 4 * ch)
+            }
+            Variant::ImaQt => {
+                // Fixed 34 B/channel block decodes exactly 64 samples.
+                if samples_per_channel != crate::ima_qt::QT_SAMPLES_PER_BLOCK {
+                    return None;
+                }
+                Some(crate::ima_qt::QT_BLOCK_SIZE * ch)
             }
             Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
         }
