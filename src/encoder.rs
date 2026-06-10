@@ -59,7 +59,8 @@ use std::collections::VecDeque;
 
 use crate::dialogic;
 use crate::tables::{
-    IMA_INDEX_ADJUST, IMA_STEP_SIZE, MS_ADAPTATION, MS_ADAPT_COEFF1, MS_ADAPT_COEFF2,
+    IMA3_INDEX_ADJUST, IMA_INDEX_ADJUST, IMA_STEP_SIZE, MS_ADAPTATION, MS_ADAPT_COEFF1,
+    MS_ADAPT_COEFF2,
 };
 use crate::yamaha;
 use crate::yamaha_a;
@@ -559,11 +560,184 @@ pub fn ima_encode_block(samples: &[i16], channels: usize, block_size: usize) -> 
     Ok(out)
 }
 
+// ----- 3-bit IMA-ADPCM-WAV (`wBitsPerSample = 3`) -----
+
+/// Run the 3-bit IMA decoder recurrence for one code without mutating
+/// `st`. Mirror of [`crate::ima_wav::ima_expand_code3`].
+fn ima3_simulate_code(st: &ImaState, code: u8) -> (i16, ImaState) {
+    let c = (code & 7) as i32;
+    let step = IMA_STEP_SIZE[st.step_index.clamp(0, 88) as usize] as i32;
+    let mut diff = step >> 2;
+    if (c & 1) != 0 {
+        diff += step >> 1;
+    }
+    if (c & 2) != 0 {
+        diff += step;
+    }
+    let mut p = st.predictor;
+    if (c & 4) != 0 {
+        p -= diff;
+    } else {
+        p += diff;
+    }
+    p = p.clamp(i16::MIN as i32, i16::MAX as i32);
+    let mut si = st.step_index + IMA3_INDEX_ADJUST[c as usize];
+    si = si.clamp(0, 88);
+    (
+        p as i16,
+        ImaState {
+            predictor: p,
+            step_index: si,
+        },
+    )
+}
+
+/// Pick the 3-bit code that minimises |decoded - target| — the same
+/// decoder-loop search the 4-bit encoder uses, over the 8 candidates.
+fn ima3_best_code(st: &ImaState, target: i32) -> (u8, ImaState) {
+    let mut best_code = 0u8;
+    let (best_sample, mut best_state) = ima3_simulate_code(st, 0);
+    let mut best_err = (best_sample as i32 - target).abs();
+    for c in 1u8..8 {
+        let (s, s2) = ima3_simulate_code(st, c);
+        let e = (s as i32 - target).abs();
+        if e < best_err {
+            best_err = e;
+            best_code = c;
+            best_state = s2;
+        }
+    }
+    (best_code, best_state)
+}
+
+/// Encode one **3-bit** IMA-ADPCM-WAV block (`wBitsPerSample = 3`).
+///
+/// `samples` is interleaved i16 PCM of `samples_per_channel * channels`
+/// samples, where `samples_per_channel = 1 + groups * 32` and
+/// `groups = (block_size - 4*channels) / (12*channels)` — the body
+/// interleaves channels in 12-byte groups (three 32-bit words = 32
+/// three-bit codes per channel), with codes packed low-bits-first into
+/// the little-endian 96-bit group value, mirroring
+/// [`crate::ima_wav::decode_block_3bit`].
+pub fn ima_encode_block_3bit(
+    samples: &[i16],
+    channels: usize,
+    block_size: usize,
+) -> Result<Vec<u8>> {
+    use crate::ima_wav::{GROUP_BYTES_3BIT, GROUP_SAMPLES_3BIT};
+    if channels == 0 || channels > 8 {
+        return Err(Error::unsupported(format!(
+            "adpcm_ima_wav(3-bit) encoder: channel count {channels} not supported (1..=8)"
+        )));
+    }
+    let header_len = 4 * channels;
+    if block_size < header_len {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav(3-bit) encoder: block size {block_size} < header {header_len}"
+        )));
+    }
+    let body_len = block_size - header_len;
+    let group_bytes = GROUP_BYTES_3BIT * channels;
+    if body_len % group_bytes != 0 {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav(3-bit) encoder: body length {body_len} not multiple of {group_bytes} ({channels}ch × 12B)"
+        )));
+    }
+    let groups = body_len / group_bytes;
+    let samples_per_channel = 1 + groups * GROUP_SAMPLES_3BIT;
+    if samples.len() != samples_per_channel * channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav(3-bit) encoder: got {} samples, expected {} ({} per channel × {channels})",
+            samples.len(),
+            samples_per_channel * channels,
+            samples_per_channel
+        )));
+    }
+
+    // Seed step_index per channel from the same mean-|Δ| leading-edge
+    // probe the 4-bit encoder uses, retuned for the 3-bit candidate
+    // ladder: the mid-range code 1 reconstructs diff = step/4 + step/2
+    // = 0.75 × step, so target step ≈ mean_delta × 4 / 3 places typical
+    // magnitudes near the middle of the 4 candidate diffs.
+    let probe = (samples_per_channel.saturating_sub(1)).min(16);
+    let mut states: Vec<ImaState> = (0..channels)
+        .map(|ch| {
+            let mut step_index: i32 = 0;
+            if probe > 0 {
+                let mut acc: i64 = 0;
+                for i in 0..probe {
+                    let s0 = samples[i * channels + ch] as i32;
+                    let s1 = samples[(i + 1) * channels + ch] as i32;
+                    acc += (s1 - s0).unsigned_abs() as i64;
+                }
+                let mean_delta = (acc / probe as i64) as i32;
+                let target_step = (mean_delta as i64 * 4 / 3).max(7) as i32;
+                for (i, &s) in IMA_STEP_SIZE.iter().enumerate() {
+                    if s as i32 >= target_step {
+                        step_index = i as i32;
+                        break;
+                    }
+                    step_index = (IMA_STEP_SIZE.len() - 1) as i32;
+                }
+                step_index = step_index.clamp(0, 88);
+            }
+            ImaState {
+                predictor: samples[ch] as i32,
+                step_index,
+            }
+        })
+        .collect();
+
+    let mut out = Vec::with_capacity(block_size);
+    // Header — identical layout to the 4-bit mode.
+    for ch in 0..channels {
+        out.extend_from_slice(&(states[ch].predictor as i16).to_le_bytes());
+        out.push(states[ch].step_index as u8);
+        out.push(0);
+    }
+
+    // Body: groups × channels × 12 bytes. For each group, channel c's 32
+    // codes are accumulated low-bits-first into a 96-bit little-endian
+    // value and emitted as 12 LE bytes at offset (group * group_bytes +
+    // 12*c).
+    let mut body = vec![0u8; body_len];
+    for g in 0..groups {
+        let group_start = g * group_bytes;
+        for ch in 0..channels {
+            let mut bits: u128 = 0;
+            for k in 0..GROUP_SAMPLES_3BIT {
+                let sample_idx = 1 + g * GROUP_SAMPLES_3BIT + k;
+                let target = samples[sample_idx * channels + ch] as i32;
+                let (code, st_after) = ima3_best_code(&states[ch], target);
+                states[ch] = st_after;
+                bits |= (code as u128) << (3 * k);
+            }
+            for i in 0..GROUP_BYTES_3BIT {
+                body[group_start + GROUP_BYTES_3BIT * ch + i] = ((bits >> (8 * i)) & 0xFF) as u8;
+            }
+        }
+    }
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Compute a near-256-byte default block size that satisfies the 3-bit
+/// framing constraint (header + a whole number of 12-byte groups per
+/// channel). At least one group is always included.
+pub(crate) fn default_block_size_3bit(channels: usize) -> usize {
+    use crate::ima_wav::GROUP_BYTES_3BIT;
+    let header = 4 * channels;
+    let group = GROUP_BYTES_3BIT * channels;
+    let groups = DEFAULT_BLOCK_SIZE.saturating_sub(header).max(group) / group;
+    header + groups.max(1) * group
+}
+
 /// IMA-ADPCM-WAV encoder.
 pub struct ImaWavEncoder {
     output_params: CodecParameters,
     channels: usize,
     block_size: usize,
+    bits_per_sample: u8,
     pcm: Vec<i16>,
     pending: VecDeque<Packet>,
     samples_emitted: i64,
@@ -574,14 +748,49 @@ impl ImaWavEncoder {
     pub fn set_block_size(&mut self, block_size: usize) {
         self.block_size = block_size;
     }
+    /// Select 3-bit or 4-bit coding (`WAVEFORMATEX::wBitsPerSample` —
+    /// the only two widths tag `0x0011` defines). Call *before*
+    /// [`Self::set_block_size`]: switching widths re-derives the default
+    /// block size so the framing constraint (4-byte vs 12-byte body
+    /// groups per channel) keeps holding.
+    pub fn set_bits_per_sample(&mut self, bits: u8) -> Result<()> {
+        match bits {
+            3 => {
+                self.bits_per_sample = 3;
+                self.block_size = default_block_size_3bit(self.channels);
+            }
+            4 => {
+                self.bits_per_sample = 4;
+                self.block_size = DEFAULT_BLOCK_SIZE;
+            }
+            other => {
+                return Err(Error::unsupported(format!(
+                    "adpcm_ima_wav encoder: bits_per_sample {other} not supported (3 or 4)"
+                )))
+            }
+        }
+        Ok(())
+    }
     fn samples_per_block(&self) -> usize {
+        use crate::ima_wav::{GROUP_BYTES_3BIT, GROUP_SAMPLES_3BIT};
         let header_len = 4 * self.channels;
         let body_len = self.block_size.saturating_sub(header_len);
-        let group_bytes = 4 * self.channels;
+        let (group_bytes, group_samples) = if self.bits_per_sample == 3 {
+            (GROUP_BYTES_3BIT * self.channels, GROUP_SAMPLES_3BIT)
+        } else {
+            (4 * self.channels, 8)
+        };
         if group_bytes == 0 {
             return 1;
         }
-        1 + (body_len / group_bytes) * 8
+        1 + (body_len / group_bytes) * group_samples
+    }
+    fn encode_one_block(&self, samples: &[i16]) -> Result<Vec<u8>> {
+        if self.bits_per_sample == 3 {
+            ima_encode_block_3bit(samples, self.channels, self.block_size)
+        } else {
+            ima_encode_block(samples, self.channels, self.block_size)
+        }
     }
     fn drain_blocks(&mut self, allow_partial_final: bool) -> Result<()> {
         let n_per_block = self.samples_per_block();
@@ -589,7 +798,7 @@ impl ImaWavEncoder {
         let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(1) as i64);
         while self.pcm.len() >= per_block_samples_interleaved {
             let take: Vec<i16> = self.pcm.drain(..per_block_samples_interleaved).collect();
-            let bytes = ima_encode_block(&take, self.channels, self.block_size)?;
+            let bytes = self.encode_one_block(&take)?;
             let pts = self.samples_emitted;
             self.samples_emitted += n_per_block as i64;
             self.pending
@@ -611,7 +820,7 @@ impl ImaWavEncoder {
             }
             debug_assert_eq!(self.pcm.len(), per_block_samples_interleaved);
             let take: Vec<i16> = self.pcm.drain(..).collect();
-            let bytes = ima_encode_block(&take, self.channels, self.block_size)?;
+            let bytes = self.encode_one_block(&take)?;
             let pts = self.samples_emitted;
             self.samples_emitted += n_per_block as i64;
             self.pending
@@ -1110,15 +1319,27 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                     "adpcm_ima_wav encoder: channels {channels} > 8 not supported"
                 )));
             }
-            Ok(Box::new(ImaWavEncoder {
+            let mut enc = ImaWavEncoder {
                 output_params: params.clone(),
                 channels: channels as usize,
                 block_size: DEFAULT_BLOCK_SIZE,
+                bits_per_sample: 4,
                 pcm: Vec::new(),
                 pending: VecDeque::new(),
                 samples_emitted: 0,
                 flushed: false,
-            }))
+            };
+            // `bits_per_sample` codec option (WAVEFORMATEX
+            // wBitsPerSample): "4" (default) or "3".
+            if let Some(v) = params.options.get("bits_per_sample") {
+                let bits: u8 = v.parse().map_err(|_| {
+                    Error::invalid(format!(
+                        "adpcm_ima_wav encoder: bits_per_sample option {v:?} is not a number"
+                    ))
+                })?;
+                enc.set_bits_per_sample(bits)?;
+            }
+            Ok(Box::new(enc))
         }
         crate::CODEC_ID_IMA_QT => {
             if channels > 2 {

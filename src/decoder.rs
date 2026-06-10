@@ -462,10 +462,36 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
             dialogic::validate_channels(channels)?;
         }
     }
+    // `bits_per_sample` codec option — IMA-WAV (tag 0x0011) defines both
+    // 4-bit (default) and 3-bit coding via WAVEFORMATEX::wBitsPerSample.
+    // Other variants have a fixed code width and reject overrides.
+    let mut ima_bits: u8 = 4;
+    if let Some(v) = params.options.get("bits_per_sample") {
+        let bits: u8 = v.parse().map_err(|_| {
+            Error::invalid(format!(
+                "adpcm: bits_per_sample option {v:?} is not a number"
+            ))
+        })?;
+        match (variant, bits) {
+            (Variant::ImaWav, 3 | 4) => ima_bits = bits,
+            (Variant::ImaWav, other) => {
+                return Err(Error::unsupported(format!(
+                    "adpcm_ima_wav: bits_per_sample {other} not supported (3 or 4)"
+                )));
+            }
+            (_, 4) => {} // every other variant is natively 4-bit
+            (v, other) => {
+                return Err(Error::unsupported(format!(
+                    "adpcm: bits_per_sample {other} not supported for {v:?} (fixed 4-bit)"
+                )));
+            }
+        }
+    }
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
         variant,
         channels,
+        ima_bits,
         pending: None,
         yamaha_state: vec![yamaha::Channel::default(); channels as usize],
         yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
@@ -484,6 +510,9 @@ pub struct AdpcmDecoder {
     codec_id: CodecId,
     variant: Variant,
     channels: u16,
+    // IMA-WAV code width: 4 (default) or 3, from the `bits_per_sample`
+    // codec option. Unused by the other variants.
+    ima_bits: u8,
     pending: Option<PendingFrame>,
     // Yamaha carries state across packets; the other block-oriented
     // variants re-seed per block.
@@ -509,6 +538,9 @@ impl AdpcmDecoder {
         let channels = self.channels as usize;
         let pcm = match self.variant {
             Variant::Ms => ms::decode_block(&pkt.data, channels)?,
+            Variant::ImaWav if self.ima_bits == 3 => {
+                ima_wav::decode_block_3bit(&pkt.data, channels)?
+            }
             Variant::ImaWav => ima_wav::decode_block(&pkt.data, channels)?,
             Variant::ImaQt => {
                 // Packet may contain N·(channels·34) bytes — iterate.

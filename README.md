@@ -8,7 +8,7 @@ Code Modulation) audio formats found in WAV / AVI / QuickTime streams.
 | Codec id          | Variant                       | Origin                      |
 |-------------------|-------------------------------|-----------------------------|
 | `adpcm_ms`        | Microsoft ADPCM               | WAV tag `0x0002` / AVI      |
-| `adpcm_ima_wav`   | IMA / DVI ADPCM — WAV variant | WAV tag `0x0011`            |
+| `adpcm_ima_wav`   | IMA / DVI ADPCM — WAV variant (4-bit **and** 3-bit) | WAV tag `0x0011` |
 | `adpcm_ima_qt`    | IMA ADPCM — QuickTime variant | QuickTime / MOV (fourcc `ima4`) |
 | `adpcm_yamaha`    | Yamaha ADPCM-B / DELTA-T (Y8950/YM2608-B/YMZ280B/AICA) | WAV tag `0x0020` |
 | `adpcm_yamaha_a`  | Yamaha ADPCM-A (YM2608/YM2610 rhythm channels) | chip-internal; no WAV tag |
@@ -50,6 +50,33 @@ via `MsEncoder::set_block_size` / `ImaWavEncoder::set_block_size`
 before the first `send_frame` call. The IMA-QT encoder uses the
 spec-mandated 34-byte-per-channel block — there is no `set_block_size`
 because the on-wire layout is fixed.
+
+### 3-bit IMA / DVI ADPCM (`wBitsPerSample = 3`)
+
+WAV tag `0x0011` defines **two** code widths — 4-bit (the common case,
+and this crate's default) and 3-bit. The 3-bit mode shares the 4-byte
+per-channel block header and the 89-entry step table but uses a
+1-sign + 2-magnitude code (`diff = step/4 + (c&1 ? step/2 : 0) +
+(c&2 ? step : 0)`), its own 8-entry index-adjust table
+(`{-1, -1, 1, 2}`, sign-mirrored — `tables::IMA3_INDEX_ADJUST`), and a
+body that interleaves channels in **12-byte groups** (three 32-bit
+words = exactly 32 three-bit codes per channel, the smallest unit with
+zero padding waste — which is why the spec requires the per-channel
+data-word count to be a multiple of three). Codes are extracted 3 bits
+at a time from the least-significant end of the little-endian 96-bit
+group value, the same low-bits-first order the 4-bit layout uses for
+its nibbles. Each block emits `1 + groups × 32` samples per channel.
+
+Reachable three ways: the block-level
+`ima_wav::decode_block_3bit` / `encoder::ima_encode_block_3bit` pair,
+`ImaWavEncoder::set_bits_per_sample(3)` on the typed encoder, or the
+`bits_per_sample` codec option (`"3"` / `"4"`) on
+`CodecParameters::options` for the registry-resolved decoder *and*
+encoder. Unset keeps the 4-bit default; out-of-spec widths — and a
+3-bit request on any other (fixed-width) variant — are rejected at
+construction. The typed `Variant` framing accessors
+(`header_bytes` / `samples_per_block` / `block_size_bytes`) continue
+to describe the default 4-bit framing.
 
 To minimise the high-amplitude leading-edge transient inherent to
 per-block re-seeding, all three block-oriented encoders pick their
@@ -328,6 +355,15 @@ implementation:
 - **Microsoft IMA ADPCM (WAV)** — block header + per-channel interleave
   layout documented on
   [MultimediaWiki Microsoft IMA ADPCM](https://wiki.multimedia.cx/index.php/Microsoft_IMA_ADPCM).
+- **3-bit IMA / DVI ADPCM** — the *DVI ADPCM Wave Type* specification
+  (Intel, 1992-12-16) as preserved in the archived WAVE-format-type
+  enumeration staged at `docs/audio/adpcm/sdl_sound-wave-types.html`:
+  3-bit decode/encode recurrence, the 8-entry 3-bit index table, and
+  the three-word (12-byte) per-channel data grouping. The document's
+  text fixes the group size (32 codes in exactly three 32-bit words,
+  codes crossing word boundaries with zero waste); the bit direction
+  within the group follows the same low-bits-first little-endian
+  convention the document's 4-bit layout uses.
 - **Apple QuickTime IMA ADPCM** — 34-byte fixed block, big-endian preamble
   (9-bit predictor + 7-bit step index), block-level channel interleave, per
   [MultimediaWiki Apple QuickTime IMA ADPCM](https://wiki.multimedia.cx/index.php/Apple_QuickTime_IMA_ADPCM).

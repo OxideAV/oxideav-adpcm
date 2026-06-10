@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **3-bit IMA / DVI ADPCM (WAV tag `0x0011`, `wBitsPerSample = 3`).**
+  The DVI ADPCM wave type defines two code widths; the crate previously
+  implemented only the 4-bit mode. The 3-bit mode shares the 4-byte
+  per-channel block header and the 89-entry step table but uses a
+  1-sign + 2-magnitude code (`diff = step/4 + (c&1 ? step/2 : 0) +
+  (c&2 ? step : 0)`), the 8-entry `tables::IMA3_INDEX_ADJUST` table
+  (`{-1, -1, 1, 2}`, sign-mirrored), and a body that interleaves
+  channels in 12-byte groups (three 32-bit words = 32 codes per
+  channel — the smallest whole-code unit), packed low-bits-first into
+  the little-endian 96-bit group value. New surface:
+  * `ima_wav::ima_expand_code3` + `ima_wav::decode_block_3bit` (+
+    `GROUP_BYTES_3BIT` / `GROUP_SAMPLES_3BIT` framing constants) —
+    decode; emits `1 + groups * 32` samples per channel.
+  * `encoder::ima_encode_block_3bit` — decoder-loop-search encode over
+    the 8 candidate codes, with the mean-|Δ| step-index seed retuned
+    for the 3-bit candidate ladder (`target_step ≈ mean|Δ| × 4/3`).
+  * `ImaWavEncoder::set_bits_per_sample(3 | 4)` — selects the code
+    width and re-derives a framing-valid default block size.
+  * Registry path: a `bits_per_sample` codec option (`"3"` / `"4"`) on
+    `CodecParameters::options` for both `make_decoder` and
+    `make_encoder`; unset keeps the 4-bit default, and out-of-spec
+    widths (or a 3-bit request on any fixed-width variant) are
+    rejected with `Error::Unsupported`.
+  * 12 new integration tests (`tests/ima_wav_3bit.rs`): mono + stereo
+    round-trip RMS bounds, the emitted-sample-count formula across
+    1–8 channels, registry option accept/reject, truncation sweep,
+    random-byte + adversarial-PCM never-panic passes; plus per-code
+    unit tests (sign mirror, index saturation, predictor clamp,
+    low-bits-first extraction order).
+
 - **`Variant::block_size_bytes()` typed accessor — inverse of
   `samples_per_block()`.** Given a desired per-channel sample count it
   returns the block byte size (`nBlockAlign`) whose block decodes to

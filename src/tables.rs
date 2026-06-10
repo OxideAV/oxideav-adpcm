@@ -44,6 +44,17 @@ pub const IMA_STEP_SIZE: [i16; 89] = [
 /// 16-entry index-adjustment table. Indexed by the 4-bit nibble.
 pub const IMA_INDEX_ADJUST: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
 
+/// 8-entry index-adjustment table for **3-bit** IMA / DVI ADPCM, indexed
+/// by the full 3-bit code (1 sign + 2 magnitude bits).
+///
+/// The 3-bit mode (WAV `wBitsPerSample = 3` on tag `0x0011`) shares the
+/// 89-entry [`IMA_STEP_SIZE`] table with the 4-bit mode but uses this
+/// smaller adjustment table: the two low-magnitude codes shrink the
+/// index by 1, the two high-magnitude codes grow it by 1 / 2. As with
+/// the 4-bit table, the sign bit does not affect the adjustment —
+/// entries `0..=3` mirror `4..=7`.
+pub const IMA3_INDEX_ADJUST: [i32; 8] = [-1, -1, 1, 2, -1, -1, 1, 2];
+
 // ---------------- Yamaha ADPCM ----------------
 //
 // Source: Yamaha Y8950 (MSX-AUDIO) Application Manual, section I-4 "Outline
@@ -223,6 +234,21 @@ mod tests {
         // Small magnitudes reduce the index; large ones increase it.
         assert_eq!(IMA_INDEX_ADJUST[0], -1);
         assert_eq!(IMA_INDEX_ADJUST[7], 8);
+    }
+
+    #[test]
+    fn ima3_index_adjust_has_expected_shape() {
+        assert_eq!(IMA3_INDEX_ADJUST.len(), 8);
+        // Sign bit (code bit 2) does not affect the adjustment: the lower
+        // half mirrors the upper half.
+        for m in 0..4 {
+            assert_eq!(IMA3_INDEX_ADJUST[m], IMA3_INDEX_ADJUST[m + 4]);
+        }
+        // Low magnitudes shrink the index; high magnitudes grow it.
+        assert_eq!(IMA3_INDEX_ADJUST[0], -1);
+        assert_eq!(IMA3_INDEX_ADJUST[1], -1);
+        assert_eq!(IMA3_INDEX_ADJUST[2], 1);
+        assert_eq!(IMA3_INDEX_ADJUST[3], 2);
     }
 
     #[test]
