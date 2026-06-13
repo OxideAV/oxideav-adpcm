@@ -200,6 +200,7 @@ fn yamaha_b_encoder_with_seeded_state_never_panics() {
         let mut state = [yamaha::Channel {
             predictor: rng.next_i16() as i32 * 200, // possibly out of i16
             step: (rng.next_u64() as i32) % 10_000,
+            ..yamaha::Channel::default()
         }];
         let n = (rng.next_u64() as usize) % 128;
         let pcm = rng.pcm(n);

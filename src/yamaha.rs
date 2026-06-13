@@ -33,13 +33,64 @@
 //! self-consistent by construction (no third-party encoder source
 //! consulted; the analysis path is the spec's own inverse of synthesis).
 
-use crate::tables::{YAMAHA_DIFF_LOOKUP, YAMAHA_INDEX_SCALE, YAMAHA_STEP_MAX, YAMAHA_STEP_MIN};
+use crate::tables::{
+    YAMAHA_DIFF_LOOKUP, YAMAHA_INDEX_SCALE, YAMAHA_INDEX_SCALE_OPNA, YAMAHA_STEP_MAX,
+    YAMAHA_STEP_MIN,
+};
+
+/// Which Yamaha chip's exact step-adaptation constants the codec emulates.
+///
+/// The synthesis recurrence and the magnitude contribution lookup
+/// (`YAMAHA_DIFF_LOOKUP`) are identical across chips. What differs is the
+/// **quantization-width change rate** `f(L3,L2,L1)`: each chip rounds the
+/// same `~1.1^M` curve slightly differently, so a long stream diverges
+/// when decoded against the wrong constants.
+///
+/// - [`Chip::Aica`] — the AICA FQ8005 / Y8950 / YMZ280B rounding,
+///   `{0.8984375, 1.19921875, 1.59765625, 2.0, 2.3984375}` encoded as
+///   integer/256 ([`YAMAHA_INDEX_SCALE`], update `>> 8`). This is the
+///   default and the value the WAV-tag-`0x0020` convention uses.
+/// - [`Chip::Opna`] — the YM2608 (OPNA) Application Manual Table 5-1
+///   rounding, `{57/64, 77/64, 102/64, 128/64, 153/64}` encoded as the
+///   ×64 numerators ([`YAMAHA_INDEX_SCALE_OPNA`], update `>> 6`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Chip {
+    /// AICA FQ8005 / Y8950 / YMZ280B constants (default).
+    #[default]
+    Aica,
+    /// YM2608 (OPNA) Application Manual Table 5-1 constants.
+    Opna,
+}
+
+impl Chip {
+    /// The 8-entry step multiplier table for this chip.
+    #[inline]
+    const fn index_scale(self) -> &'static [i32; 8] {
+        match self {
+            Chip::Aica => &YAMAHA_INDEX_SCALE,
+            Chip::Opna => &YAMAHA_INDEX_SCALE_OPNA,
+        }
+    }
+
+    /// The right-shift applied after multiplying by [`Self::index_scale`]
+    /// (i.e. the table's fixed-point denominator: 256 for AICA, 64 for
+    /// OPNA).
+    #[inline]
+    const fn scale_shift(self) -> u32 {
+        match self {
+            Chip::Aica => 8,
+            Chip::Opna => 6,
+        }
+    }
+}
 
 /// Per-channel running decoder state.
 #[derive(Clone, Copy, Debug)]
 pub struct Channel {
     pub predictor: i32,
     pub step: i32,
+    /// Which chip's step-adaptation constants drive the `step` update.
+    pub chip: Chip,
 }
 
 impl Default for Channel {
@@ -47,6 +98,19 @@ impl Default for Channel {
         Self {
             predictor: 0,
             step: YAMAHA_STEP_MIN,
+            chip: Chip::Aica,
+        }
+    }
+}
+
+impl Channel {
+    /// A fresh channel emulating the given chip's step-adaptation
+    /// constants (predictor 0, step at [`YAMAHA_STEP_MIN`]).
+    #[inline]
+    pub fn for_chip(chip: Chip) -> Self {
+        Self {
+            chip,
+            ..Self::default()
         }
     }
 }
@@ -67,8 +131,8 @@ pub fn decode_nibble(state: &mut Channel, nibble: u8) -> i16 {
     }
     state.predictor = state.predictor.clamp(i16::MIN as i32, i16::MAX as i32);
 
-    // Step update.
-    state.step = (state.step * YAMAHA_INDEX_SCALE[mag]) >> 8;
+    // Step update — chip-specific multiplier table + fixed-point shift.
+    state.step = (state.step * state.chip.index_scale()[mag]) >> state.chip.scale_shift();
     state.step = state.step.clamp(YAMAHA_STEP_MIN, YAMAHA_STEP_MAX);
 
     state.predictor as i16
@@ -398,5 +462,104 @@ mod tests {
         assert!(encode_packet(&[], &mut st).is_empty());
         let mut empty_state: [Channel; 0] = [];
         assert!(encode_packet(&[1, 2, 3], &mut empty_state).is_empty());
+    }
+
+    // ----- chip multiplier selection (AICA vs OPNA) -----
+
+    #[test]
+    fn default_channel_emulates_aica() {
+        assert_eq!(Channel::default().chip, Chip::Aica);
+        assert_eq!(Chip::default(), Chip::Aica);
+    }
+
+    #[test]
+    fn for_chip_constructor_seeds_step_and_chip() {
+        for chip in [Chip::Aica, Chip::Opna] {
+            let c = Channel::for_chip(chip);
+            assert_eq!(c.chip, chip);
+            assert_eq!(c.predictor, 0);
+            assert_eq!(c.step, YAMAHA_STEP_MIN);
+        }
+    }
+
+    #[test]
+    fn opna_step_update_matches_table_5_1_fractions() {
+        use crate::tables::{YAMAHA_INDEX_SCALE, YAMAHA_INDEX_SCALE_OPNA};
+        // From the minimum step (127), the post-update step for each
+        // magnitude code must equal (127 * f_x64[mag]) >> 6 for OPNA and
+        // (127 * f_x256[mag]) >> 8 for AICA, exactly. Both clamp to
+        // [127, 24576]; at 127 no entry under-shoots the floor for the
+        // small-magnitude codes after clamping, so compare clamped.
+        for mag in 0u8..8 {
+            let mut opna = Channel::for_chip(Chip::Opna);
+            let _ = decode_nibble(&mut opna, mag);
+            let want_opna = ((YAMAHA_STEP_MIN * YAMAHA_INDEX_SCALE_OPNA[mag as usize]) >> 6)
+                .max(YAMAHA_STEP_MIN);
+            assert_eq!(opna.step, want_opna, "OPNA step mismatch for mag {mag}");
+
+            let mut aica = Channel::for_chip(Chip::Aica);
+            let _ = decode_nibble(&mut aica, mag);
+            let want_aica =
+                ((YAMAHA_STEP_MIN * YAMAHA_INDEX_SCALE[mag as usize]) >> 8).max(YAMAHA_STEP_MIN);
+            assert_eq!(aica.step, want_aica, "AICA step mismatch for mag {mag}");
+        }
+    }
+
+    #[test]
+    fn opna_and_aica_diverge_on_a_long_max_magnitude_run() {
+        // The small per-step rounding difference (153/64 vs 614/256 for
+        // the max code) compounds over a long run, so the two chips'
+        // step trajectories — and therefore their reconstructed
+        // predictors — must differ for at least one sample before both
+        // saturate. Decode the same nibble stream under each chip.
+        let nibbles: Vec<u8> = (0..200).map(|i| if i % 2 == 0 { 7 } else { 0xF }).collect();
+        let mut opna = Channel::for_chip(Chip::Opna);
+        let mut aica = Channel::for_chip(Chip::Aica);
+        let mut diverged = false;
+        for &n in &nibbles {
+            let so = decode_nibble(&mut opna, n);
+            let sa = decode_nibble(&mut aica, n);
+            if so != sa || opna.step != aica.step {
+                diverged = true;
+            }
+        }
+        assert!(
+            diverged,
+            "OPNA and AICA produced identical trajectories — the chip selector is a no-op"
+        );
+    }
+
+    #[test]
+    fn opna_step_stays_in_spec_range() {
+        // Same invariant as the AICA path: the step never leaves
+        // [127, 24576] regardless of the nibble stream.
+        let mut up = Channel::for_chip(Chip::Opna);
+        let mut down = Channel::for_chip(Chip::Opna);
+        for _ in 0..1000 {
+            let _ = decode_nibble(&mut up, 7);
+            let _ = decode_nibble(&mut down, 0);
+            for st in [&up, &down] {
+                assert!(st.step >= YAMAHA_STEP_MIN);
+                assert!(st.step <= YAMAHA_STEP_MAX);
+            }
+        }
+    }
+
+    #[test]
+    fn opna_encode_decode_round_trips_self_consistently() {
+        // The encoder advances state through decode_nibble, so an OPNA
+        // encoder + OPNA decoder reconstruct identically. Verify the
+        // decoder fed the encoder's nibbles reproduces the encoder's
+        // predictor trajectory exactly.
+        let mut enc = Channel::for_chip(Chip::Opna);
+        let mut dec = Channel::for_chip(Chip::Opna);
+        let pcm = [0i16, 300, 1200, -2000, 15000, -9000, 50, -50];
+        for &s in &pcm {
+            let (n, _) = encode_sample(&mut enc, s);
+            let _ = decode_nibble(&mut dec, n);
+            assert_eq!(enc.predictor, dec.predictor);
+            assert_eq!(enc.step, dec.step);
+            assert_eq!(enc.chip, dec.chip);
+        }
     }
 }

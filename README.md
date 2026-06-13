@@ -98,6 +98,48 @@ round-trip RMS by **63–88%** versus the cold-start seeds (MS mono
 271 → 100; MS stereo 207 → 86; IMA-WAV mono 413 → 88; IMA-WAV stereo
 634 → 78).
 
+### Yamaha ADPCM-B chip-multiplier selection (AICA vs OPNA)
+
+The `adpcm_yamaha` codec covers a family of chips (Y8950, YM2608-B,
+YMZ280B, AICA) that share the synthesis recurrence and the magnitude
+contribution lookup but round the **quantization-width change rate**
+`f(L3,L2,L1)` slightly differently. The two rounded constant sets the
+staged vendor datasheets print are:
+
+| Code | YM2608 OPNA Table 5-1 (`f`) | AICA / Y8950 (`f`) |
+|------|-----------------------------|--------------------|
+| 000…011 | 57/64  = 0.890625  | 115/128 = 0.8984375  |
+| 100     | 77/64  = 1.203125  | 1.19921875           |
+| 101     | 102/64 = 1.59375   | 1.59765625           |
+| 110     | 128/64 = 2.0       | 2.0                  |
+| 111     | 153/64 = 2.390625  | 2.3984375            |
+
+Decoded against the wrong constants a long stream slowly diverges (the
+per-step rounding compounds through the multiplicative step update). The
+[`yamaha::Chip`] selector on [`yamaha::Channel`] picks the exact set:
+
+```rust
+use oxideav_adpcm::yamaha::{Channel, Chip, decode_nibble};
+
+// Default: AICA / Y8950 / YMZ280B constants (integer/256, update >> 8).
+let mut aica = Channel::default();           // == Channel::for_chip(Chip::Aica)
+// YM2608 (OPNA) Application Manual Table 5-1 constants (×64, update >> 6).
+let mut opna = Channel::for_chip(Chip::Opna);
+
+let _ = decode_nibble(&mut aica, 0x7);
+let _ = decode_nibble(&mut opna, 0x7);
+```
+
+`Chip::Aica` is the default (the WAV-tag-`0x0020` convention); the
+registry-resolved `adpcm_yamaha` decoder/encoder uses it. The OPNA
+constants are reached by constructing channel state with
+`Channel::for_chip(Chip::Opna)` and driving `decode_nibble` /
+`decode_packet` / `encode_packet` directly — useful for chiptune /
+hardware-emulation callers reconstructing a YM2608 OPNA ADPCM-B stream
+bit-for-bit. The two tables live in `tables::YAMAHA_INDEX_SCALE`
+(AICA) and `tables::YAMAHA_INDEX_SCALE_OPNA` (OPNA, the Table 5-1 ×64
+numerators).
+
 ## Typed variant accessor
 
 For callers that already know which ADPCM variant they want — a fixture

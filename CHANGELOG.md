@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Yamaha ADPCM-B chip-multiplier selection (AICA vs YM2608 OPNA).**
+  The `adpcm_yamaha` family covers chips that round the
+  quantization-width change rate `f(L3,L2,L1)` differently. The crate
+  previously hard-wired the AICA / Y8950 rounding (`integer/256`,
+  update `>> 8`); it now also exposes the **YM2608 (OPNA) Application
+  Manual Table 5-1** rounding (`{57,77,102,128,153}/64`, update `>> 6`).
+  New surface:
+  * `yamaha::Chip` enum (`Aica` default / `Opna`) and
+    `yamaha::Channel::for_chip` constructor; `Channel` carries a `chip`
+    field so `decode_nibble` / `decode_packet` / `encode_packet` apply
+    the right step-update constants per channel.
+  * `tables::YAMAHA_INDEX_SCALE_OPNA` — the Table 5-1 ×64 numerators.
+  The registry-resolved `adpcm_yamaha` decoder/encoder keeps the AICA
+  default (the WAV-tag-`0x0020` convention); the OPNA constants are
+  reached by constructing channel state with `Channel::for_chip`.
+  Source: `docs/audio/adpcm/yamaha/yamaha-adpcm.md` §1
+  (`ym2608-opna-application-manual.pdf` Table 5-1 +
+  `aica-fq8005-sound-block-manual.pdf` Table 2).
+
 - **3-bit IMA / DVI ADPCM (WAV tag `0x0011`, `wBitsPerSample = 3`).**
   The DVI ADPCM wave type defines two code widths; the crate previously
   implemented only the 4-bit mode. The 3-bit mode shares the 4-byte

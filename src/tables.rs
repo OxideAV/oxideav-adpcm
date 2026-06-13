@@ -85,7 +85,38 @@ pub const YAMAHA_DIFF_LOOKUP: [i32; 8] = [1, 3, 5, 7, 9, 11, 13, 15];
 /// 8-entry step-adaptation multiplier, indexed by |nibble| (low 3 bits).
 /// `step' = (step * YAMAHA_INDEX_SCALE[mag]) >> 8`, then clamped to
 /// `[STEP_MIN, STEP_MAX]`.
+///
+/// These are the AICA FQ8005 / Y8950 constants: the manual's decimal
+/// change-rates `{0.8984375, 1.19921875, 1.59765625, 2.0, 2.3984375}`
+/// multiplied by 256 (`0.8984375·256 = 230`, `2.3984375·256 = 614`).
+/// The YM2608 OPNA datasheet prints *slightly different* exact fractions
+/// for the same curve — see [`YAMAHA_INDEX_SCALE_OPNA`].
 pub const YAMAHA_INDEX_SCALE: [i32; 8] = [230, 230, 230, 230, 307, 409, 512, 614];
+
+/// 8-entry step-adaptation multiplier for the **YM2608 (OPNA)** chip,
+/// indexed by |nibble| (low 3 bits). `step' = (step *
+/// YAMAHA_INDEX_SCALE_OPNA[mag]) >> 6`, then clamped to
+/// `[STEP_MIN, STEP_MAX]`.
+///
+/// Transcribed verbatim from the *YM2608 (OPNA) Application Manual*,
+/// Table 5-1 ("ADPCM data and quantization-width change rate"), which
+/// lists the change rate `f` as the fractions
+/// `{57/64, 77/64, 102/64, 128/64, 153/64}` (×64 numerators below):
+///
+/// | `L3 L2 L1` | `f` (Table 5-1) |
+/// |------------|-----------------|
+/// | 000…011    | 57/64  ≈ 0.890625 |
+/// | 100        | 77/64  ≈ 1.203125 |
+/// | 101        | 102/64 ≈ 1.59375  |
+/// | 110        | 128/64 = 2.0      |
+/// | 111        | 153/64 ≈ 2.390625 |
+///
+/// Distinct from [`YAMAHA_INDEX_SCALE`] (the AICA/Y8950 rounding of the
+/// same `~1.1^M` curve): the OPNA small-magnitude multiplier is 57/64 =
+/// 0.890625 vs AICA's 115/128 = 0.8984375, and the large-magnitude
+/// entries differ in the low bits too. Pick the table for the chip being
+/// emulated — see [`crate::yamaha::Chip`].
+pub const YAMAHA_INDEX_SCALE_OPNA: [i32; 8] = [57, 57, 57, 57, 77, 102, 128, 153];
 
 /// Minimum step value (Y8950 manual: Δ saturates at 127).
 pub const YAMAHA_STEP_MIN: i32 = 127;
@@ -257,6 +288,36 @@ mod tests {
         assert_eq!(YAMAHA_INDEX_SCALE.len(), 8);
         assert_eq!(YAMAHA_DIFF_LOOKUP[0], 1);
         assert_eq!(YAMAHA_DIFF_LOOKUP[7], 15);
+    }
+
+    #[test]
+    fn yamaha_opna_index_scale_matches_table_5_1() {
+        // YM2608 OPNA Application Manual Table 5-1: change rate f as the
+        // fractions {57/64, 77/64, 102/64, 128/64, 153/64}; below stored
+        // as the ×64 numerators (update shifts >> 6).
+        assert_eq!(YAMAHA_INDEX_SCALE_OPNA.len(), 8);
+        assert_eq!(YAMAHA_INDEX_SCALE_OPNA, [57, 57, 57, 57, 77, 102, 128, 153]);
+        // The four small-magnitude codes share the single down-rate 57/64.
+        for m in 0..4 {
+            assert_eq!(YAMAHA_INDEX_SCALE_OPNA[m], 57);
+        }
+        // 128/64 is exactly 2.0 — the only entry that is an exact integer
+        // multiplier in both the OPNA and AICA roundings.
+        assert_eq!(YAMAHA_INDEX_SCALE_OPNA[6], 128);
+        // The OPNA and AICA tables are distinct roundings of the same
+        // curve: small-magnitude differs (57/64 vs 230/256) but the 2.0
+        // entry agrees once both are scaled to a common denominator
+        // (128/64 = 512/256).
+        assert_ne!(
+            YAMAHA_INDEX_SCALE_OPNA[0] * 4,
+            YAMAHA_INDEX_SCALE[0],
+            "57*4=228 != 230: OPNA and AICA small-mag rounding must differ"
+        );
+        assert_eq!(
+            YAMAHA_INDEX_SCALE_OPNA[6] * 4,
+            YAMAHA_INDEX_SCALE[6],
+            "128/64 and 512/256 both equal 2.0"
+        );
     }
 
     #[test]
