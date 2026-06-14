@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.5...v0.0.6) - 2026-06-14
+
+### Other
+
+- route WAVE_FORMAT_OKI_ADPCM (0x0010) to the Dialogic/OKI decoder
+- clarify MS-ADPCM delta seed is shared across the predictor search
+- MS-ADPCM encoder per-block predictor coefficient search
+- add ADPCM-B chip-multiplier selection (AICA default / YM2608 OPNA)
+- 3-bit IMA/DVI ADPCM (WAV tag 0x0011, wBitsPerSample=3) decode + encode
+- Variant::block_size_bytes — inverse of samples_per_block (nBlockAlign sizing)
+- typed header_bytes + samples_per_block accessors on Variant
+- typed Shape + max_channels accessors on Variant
+- drop release-plz.toml — use release-plz defaults across the workspace
+- mean-|Δ| step seeding for MS / IMA-WAV block-oriented encoders
+- typed Variant accessor surface (codec_id / wave_format_tag / fourcc / all)
+- encoder fuzz / never-panic harness + 2 latent encoder panics fixed
+- cargo-fuzz harness — 4 libfuzzer targets for coverage-guided decode exploration
+- criterion bench harness for the per-block / per-packet decode hot path
+- add Yamaha ADPCM-A (YM2608 rhythm / YM2610 ADPCM-A channel)
+- decoder fuzz coverage + MS-ADPCM overflow fix
+
 ### Changed
 
 - **MS-ADPCM encoder: per-block predictor coefficient search.** The
