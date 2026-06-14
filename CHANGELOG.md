@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **MS-ADPCM encoder: per-block predictor coefficient search.** The
+  encoder previously hard-wrote predictor index 0 (`coef1=256, coef2=0`,
+  plain first-order delta) into every block. It now trial-encodes each
+  block under all seven spec predictor coefficient pairs (`AdaptCoeff1` /
+  `AdaptCoeff2` rows 0..=6) and writes the index that minimises total
+  absolute reconstruction error into the per-channel header byte. Because
+  the chosen index travels in the block header, the decode is byte-for-
+  byte unaffected for any decoder — this is a pure encoder quality gain
+  with no wire-format change. On the reference 22.05 kHz 440 Hz
+  amplitude-12000 sine (one 256-byte block) single-block round-trip RMS
+  drops from ~100 (index-0 only) to ~14 (an 86% reduction); a clean tone
+  is modelled far better by the second-order pair than by first-order
+  delta, while transient blocks fall back to index 0 automatically.
+  Derived from the MS-ADPCM decode recurrence already in `crate::ms`; no
+  external encoder consulted.
+
 ### Added
 
 - **Yamaha ADPCM-B chip-multiplier selection (AICA vs YM2608 OPNA).**

@@ -14,10 +14,11 @@
 //!
 //! - **MS-ADPCM** (`adpcm_ms`, WAVEFORMATEX tag `0x0002`) — block size
 //!   defaults to 256 bytes per channel; the first 7 bytes per channel
-//!   are the header, the remainder carries packed nibbles. Predictor
-//!   index 0 is selected for every block (the spec permits any of the
-//!   7 default coefficient pairs but does not require any one in
-//!   particular for encoders).
+//!   are the header, the remainder carries packed nibbles. Each block
+//!   trial-encodes under all 7 spec predictor coefficient pairs and
+//!   writes the index that minimises total reconstruction error (the
+//!   chosen index travels in the block header, so the decode is
+//!   unaffected — a pure quality gain, no wire-format change).
 //!
 //! - **Microsoft IMA-ADPCM-WAV** (`adpcm_ima_wav`, WAVEFORMATEX tag
 //!   `0x0011`) — block size defaults to 256 bytes per channel; the
@@ -151,9 +152,91 @@ fn ms_best_nibble(st: &MsState, target: i32) -> (u8, i16) {
     (best_nibble, best_sample)
 }
 
+/// Number of default MS-ADPCM predictor coefficient pairs the spec
+/// defines (`AdaptCoeff1` / `AdaptCoeff2` rows 0..=6). The decoder reads
+/// a per-channel predictor index in this range and looks the pair up; an
+/// encoder is free to pick whichever index reconstructs the block most
+/// faithfully, since the index is written into the block header.
+const MS_NUM_PREDICTORS: usize = 7;
+
+/// Encode the body of one MS-ADPCM block for a *fixed* predictor index,
+/// returning the packed nibble bytes plus the total absolute
+/// reconstruction error across every encoded sample. `states` are the
+/// already-seeded per-channel states (delta + the two prelude samples);
+/// they are consumed by value so the caller can re-seed for the next
+/// candidate predictor. The two prelude samples themselves are exact
+/// (they go in the header verbatim) so they contribute no error.
+fn ms_encode_body(
+    samples: &[i16],
+    channels: usize,
+    body_len: usize,
+    mut states: [MsState; 2],
+) -> (Vec<u8>, i64) {
+    let mut body = Vec::with_capacity(body_len);
+    let mut err: i64 = 0;
+    let mut ch_cursor: usize = 0;
+    let mut sample_cursor: [usize; 2] = [2, 2]; // next sample index per channel
+    for _ in 0..body_len {
+        // Hi nibble.
+        let ch_h = ch_cursor;
+        let target_h = samples[sample_cursor[ch_h] * channels + ch_h] as i32;
+        let (nh, sh) = ms_best_nibble(&states[ch_h], target_h);
+        err += (sh as i64 - target_h as i64).abs();
+        ms_advance(&mut states[ch_h], nh, sh);
+        sample_cursor[ch_h] += 1;
+        ch_cursor = (ch_cursor + 1) % channels;
+
+        // Lo nibble.
+        let ch_l = ch_cursor;
+        let target_l = samples[sample_cursor[ch_l] * channels + ch_l] as i32;
+        let (nl, sl) = ms_best_nibble(&states[ch_l], target_l);
+        err += (sl as i64 - target_l as i64).abs();
+        ms_advance(&mut states[ch_l], nl, sl);
+        sample_cursor[ch_l] += 1;
+        ch_cursor = (ch_cursor + 1) % channels;
+
+        body.push((nh << 4) | nl);
+    }
+    (body, err)
+}
+
+/// Build the seeded per-channel [`MsState`] array for a candidate
+/// predictor index. `sample1` / `sample2` come from the two prelude
+/// samples; `delta` is seeded from the mean absolute first-difference of
+/// the block's leading edge (see the long note below).
+fn ms_seed_states(
+    samples: &[i16],
+    channels: usize,
+    predictor_index: usize,
+    delta: i32,
+) -> [MsState; 2] {
+    let mut states = [MsState {
+        coef1: MS_ADAPT_COEFF1[predictor_index],
+        coef2: MS_ADAPT_COEFF2[predictor_index],
+        delta,
+        sample1: 0,
+        sample2: 0,
+    }; 2];
+    for (ch, st) in states.iter_mut().enumerate().take(channels) {
+        st.sample2 = samples[ch] as i32;
+        st.sample1 = samples[channels + ch] as i32;
+    }
+    states
+}
+
 /// Encode `samples_per_channel` interleaved-by-channel `i16` PCM samples
 /// (`samples[i*channels + c]` is channel `c`'s sample `i`) into one
 /// MS-ADPCM block of `target_block_size` bytes.
+///
+/// The encoder trial-encodes the block under each of the 7 default
+/// predictor coefficient pairs the spec defines and keeps whichever
+/// minimises the total absolute reconstruction error (ties resolve to
+/// the lower predictor index). Because the chosen index is written into
+/// the per-channel header byte, the decoder reconstructs the same stream
+/// regardless of which index won — so this is a pure quality gain with
+/// no wire-format change. The per-block predictor is independent: a
+/// transient block can pick a high-order pair while a steady block falls
+/// back to index 0 (`coef1=256, coef2=0`, plain first-order delta).
 ///
 /// Returns an error if `samples_per_channel < 2` (we need at least the
 /// two prelude samples) or if the requested block size cannot fit the
@@ -193,46 +276,31 @@ pub fn encode_block(samples: &[i16], channels: usize, target_block_size: usize) 
         )));
     }
 
-    // Predictor index 0 is the safe default: coef1=256, coef2=0 means
-    // "predicted = sample1" (delta-from-previous). Header writes:
-    // - 1 byte predictor index per channel
-    // - i16 LE initial delta per channel
-    // - i16 LE sample1 per channel  (the SECOND prelude sample emitted)
-    // - i16 LE sample2 per channel  (the FIRST prelude sample emitted)
-    let predictor_index = 0u8;
-    let mut states = [MsState {
-        coef1: MS_ADAPT_COEFF1[predictor_index as usize],
-        coef2: MS_ADAPT_COEFF2[predictor_index as usize],
-        delta: 0,
-        sample1: 0,
-        sample2: 0,
-    }; 2];
-
-    // Seed each channel: sample2 = samples[0,ch], sample1 = samples[1,ch].
+    // Initial delta seed (shared across all candidate predictors).
     //
-    // Initial delta is a moderate value. The decoder recurrence with
-    // predictor index 0 (coef1=256, coef2=0) reduces to
+    // The decoder recurrence with predictor index 0 (coef1=256, coef2=0)
+    // reduces to
     //     reconstructed = sample1 + signed_nibble * delta
     // where `signed_nibble = (nibble ^ 8) - 8` ranges -8..=7. So for an
     // input sample whose target deviates from `sample1` by ~|Δ| LSB, the
     // search loop's best nibble picks a magnitude near |Δ|/delta. A
     // delta in the range "|Δ| / 4" places typical values at a mid-range
-    // nibble (magnitude 4) which leaves headroom on both sides.
+    // nibble (magnitude 4) which leaves headroom on both sides. The
+    // higher-order predictors track |Δ| better still, so the same seed
+    // is a reasonable cold start for them too; the search then adapts
+    // delta per the spec adaptation table regardless of predictor.
     //
     // Without this seed, the delta starts at the spec minimum of 16 and
     // grows multiplicatively only through MS_ADAPTATION; for a
     // high-amplitude bandlimited signal the first half-dozen nibbles
     // cannot track the target, producing a large leading-edge transient.
-    // Estimating the seed from |sample[i+1] - sample[i]| over the first
-    // few samples in the block costs O(few) and is bounded.
     //
     // The seed inputs are taken from the per-channel sample axis. We
     // cap probes at `min(16, samples_per_channel - 1)` to keep the
     // estimate local to the leading edge.
     let probe = (samples_per_channel.saturating_sub(1)).clamp(1, 16);
-    for ch in 0..channels {
-        states[ch].sample2 = samples[ch] as i32;
-        states[ch].sample1 = samples[channels + ch] as i32;
+    let mut seed_delta = [16i32; 2];
+    for (ch, sd) in seed_delta.iter_mut().enumerate().take(channels) {
         let mut acc: i64 = 0;
         for i in 0..probe {
             let s0 = samples[i * channels + ch] as i32;
@@ -243,49 +311,57 @@ pub fn encode_block(samples: &[i16], channels: usize, target_block_size: usize) 
         // delta ≈ mean_abs_delta / 4 places mid-range nibble at the
         // typical step; floor at the spec minimum (16) and cap below
         // i16::MAX (i32-storable but kept conservative).
-        let seed = (mean_abs_delta / 4).clamp(16, 16384);
-        states[ch].delta = seed;
+        *sd = (mean_abs_delta / 4).clamp(16, 16384);
+    }
+
+    // Trial-encode under each of the 7 spec predictor pairs; keep the
+    // index with the lowest total absolute reconstruction error. The
+    // delta seed is per-channel; for the (rare) case where the two
+    // channels disagree we still pick a single predictor index per
+    // channel below, so the winner is chosen on the summed error of
+    // both channels using their own seeds.
+    let mut best_index = 0usize;
+    let mut best_body: Vec<u8> = Vec::new();
+    let mut best_err = i64::MAX;
+    for pi in 0..MS_NUM_PREDICTORS {
+        // Seed both channels with their own delta but the shared pi.
+        let mut states = ms_seed_states(samples, channels, pi, seed_delta[0]);
+        for ch in 1..channels {
+            states[ch].delta = seed_delta[ch];
+        }
+        let (body, err) = ms_encode_body(samples, channels, body_len, states);
+        if err < best_err {
+            best_err = err;
+            best_index = pi;
+            best_body = body;
+        }
+    }
+
+    // Re-seed the winning states purely to recover the header delta /
+    // prelude values (cheap; avoids threading them out of the loop).
+    let mut states = ms_seed_states(samples, channels, best_index, seed_delta[0]);
+    for ch in 1..channels {
+        states[ch].delta = seed_delta[ch];
     }
 
     let mut out = Vec::with_capacity(target_block_size);
-    // Header.
+    // Header — per channel: predictor index byte, then i16-LE delta,
+    // sample1 (2nd prelude), sample2 (1st prelude), each grouped by field.
     for _ch in 0..channels {
-        out.push(predictor_index);
+        out.push(best_index as u8);
     }
-    for ch in 0..channels {
-        out.extend_from_slice(&(states[ch].delta as i16).to_le_bytes());
+    for st in states.iter().take(channels) {
+        out.extend_from_slice(&(st.delta as i16).to_le_bytes());
     }
-    for ch in 0..channels {
-        out.extend_from_slice(&(states[ch].sample1 as i16).to_le_bytes());
+    for st in states.iter().take(channels) {
+        out.extend_from_slice(&(st.sample1 as i16).to_le_bytes());
     }
-    for ch in 0..channels {
-        out.extend_from_slice(&(states[ch].sample2 as i16).to_le_bytes());
+    for st in states.iter().take(channels) {
+        out.extend_from_slice(&(st.sample2 as i16).to_le_bytes());
     }
     debug_assert_eq!(out.len(), header_len);
 
-    // Body: encode samples 2.. in the per-channel sample axis, two
-    // nibbles per byte, hi-nibble first, channels round-robin per nibble.
-    let mut ch_cursor: usize = 0;
-    let mut sample_cursor: [usize; 2] = [2, 2]; // next sample index to encode per channel
-    for _ in 0..body_len {
-        // Hi nibble.
-        let ch_h = ch_cursor;
-        let target_h = samples[sample_cursor[ch_h] * channels + ch_h] as i32;
-        let (nh, sh) = ms_best_nibble(&states[ch_h], target_h);
-        ms_advance(&mut states[ch_h], nh, sh);
-        sample_cursor[ch_h] += 1;
-        ch_cursor = (ch_cursor + 1) % channels;
-
-        // Lo nibble.
-        let ch_l = ch_cursor;
-        let target_l = samples[sample_cursor[ch_l] * channels + ch_l] as i32;
-        let (nl, sl) = ms_best_nibble(&states[ch_l], target_l);
-        ms_advance(&mut states[ch_l], nl, sl);
-        sample_cursor[ch_l] += 1;
-        ch_cursor = (ch_cursor + 1) % channels;
-
-        out.push((nh << 4) | nl);
-    }
+    out.extend_from_slice(&best_body);
     Ok(out)
 }
 
@@ -1459,6 +1535,74 @@ mod tests {
         assert!(
             rms < 1000.0,
             "MS-ADPCM round-trip RMS error {rms} exceeds 1000"
+        );
+    }
+
+    /// The per-block predictor search must (a) write an in-range index
+    /// into every per-channel header byte, and (b) never be *worse* than
+    /// forcing predictor index 0 — on a resonant signal it should be
+    /// strictly better, since a higher-order pair tracks the second-order
+    /// recurrence the plain delta predictor (index 0) cannot.
+    #[test]
+    fn ms_per_block_predictor_search_no_worse_than_index_0() {
+        // A decaying resonator: y[n] = a1*y[n-1] + a2*y[n-2] excited by a
+        // single impulse. Its spectrum is concentrated, so a second-order
+        // predictor (coef2 != 0) models it far better than first-order
+        // delta. This is exactly the case the predictor search exists for.
+        let n = 500;
+        let mut y = vec![0i16; n];
+        let (mut p1, mut p2) = (0.0f64, 0.0f64);
+        for (i, slot) in y.iter_mut().enumerate() {
+            let excite = if i == 0 { 12000.0 } else { 0.0 };
+            // Poles giving a ~1.5 kHz ring at 22.05 kHz, lightly damped.
+            let cur = 1.90 * p1 - 0.95 * p2 + excite;
+            *slot = cur.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16;
+            p2 = p1;
+            p1 = cur;
+        }
+
+        let block = encode_block(&y, 1, 256).unwrap();
+        // Header byte 0 is the predictor index; must be a valid spec row.
+        let chosen = block[0] as usize;
+        assert!(
+            chosen < MS_NUM_PREDICTORS,
+            "chosen predictor index {chosen} out of range"
+        );
+
+        let decoded = ms::decode_block(&block, 1).unwrap();
+        let rms_search = rms_error(&decoded, &y[..decoded.len()]);
+
+        // Reconstruct what index 0 alone would have produced, using the
+        // same seed the encoder picks, and decode it the same way.
+        let probe = (y.len() - 1).clamp(1, 16);
+        let mut acc: i64 = 0;
+        for i in 0..probe {
+            acc += (y[i + 1] as i32 - y[i] as i32).unsigned_abs() as i64;
+        }
+        let seed = ((acc / probe as i64) as i32 / 4).clamp(16, 16384);
+        let body_len = 256 - 7;
+        let states0 = ms_seed_states(&y, 1, 0, seed);
+        let (body0, _) = ms_encode_body(&y, 1, body_len, states0);
+        let mut block0 = Vec::with_capacity(256);
+        block0.push(0u8);
+        block0.extend_from_slice(&(seed as i16).to_le_bytes());
+        block0.extend_from_slice(&(y[1]).to_le_bytes());
+        block0.extend_from_slice(&(y[0]).to_le_bytes());
+        block0.extend_from_slice(&body0);
+        let decoded0 = ms::decode_block(&block0, 1).unwrap();
+        let rms_index0 = rms_error(&decoded0, &y[..decoded0.len()]);
+
+        // Search must never lose to the fixed-index-0 baseline.
+        assert!(
+            rms_search <= rms_index0 + 1e-9,
+            "predictor search RMS {rms_search} worse than index-0 RMS {rms_index0}"
+        );
+        // On this resonator the search should actually pick a non-zero
+        // predictor and beat index 0 by a clear margin.
+        assert_ne!(chosen, 0, "expected a higher-order predictor to win");
+        assert!(
+            rms_search < rms_index0,
+            "search RMS {rms_search} not better than index-0 RMS {rms_index0}"
         );
     }
 
