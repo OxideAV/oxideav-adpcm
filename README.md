@@ -12,7 +12,7 @@ Code Modulation) audio formats found in WAV / AVI / QuickTime streams.
 | `adpcm_ima_qt`    | IMA ADPCM — QuickTime variant | QuickTime / MOV (fourcc `ima4`) |
 | `adpcm_yamaha`    | Yamaha ADPCM-B / DELTA-T (Y8950/YM2608-B/YMZ280B/AICA) | WAV tag `0x0020` |
 | `adpcm_yamaha_a`  | Yamaha ADPCM-A (YM2608/YM2610 rhythm channels) | chip-internal; no WAV tag |
-| `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless; no WAV tag) |
+| `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless) **and** WAV tag `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) |
 
 G.722 (WAV tag `0x0028`) and G.726/G.723.1/G.729 live in their own crates and
 are NOT re-implemented here.
@@ -451,7 +451,21 @@ implementation:
   Dialogic VOX is **headerless** — `.vox` files carry no sample rate;
   callers supply it out of band (commonly 6 kHz or 8 kHz for telephony).
   The MSM6258's LSB-first nibble order is reachable via the lower-level
-  `dialogic::decode_packet(.., NibbleOrder::LoFirst, ..)` API.
+  `dialogic::decode_packet(.., NibbleOrder::LoFirst, ..)` API. The same
+  OKI chip-set algorithm also has a WAV-container framing,
+  `WAVE_FORMAT_OKI_ADPCM` = `0x0010` (the *OKI ADPCM Wave Types* entry in
+  the archived WAVE-format-type enumeration at
+  `docs/audio/adpcm/sdl_sound-wave-types.html`: the format is "created
+  and read by the OKI ADPCM chip set"). Its 4-bit body is the canonical
+  VOX layout — two samples per byte, high nibble first — so the
+  `adpcm_dialogic` registration now also claims wave tag `0x0010`, and
+  `Variant::Dialogic.wave_format_tag()` returns `Some(0x0010)`. A WAV
+  demuxer that has parsed `WAVEFORMATEX::wFormatTag = 0x0010` therefore
+  resolves to this decoder by tag and decodes byte-identically to the
+  headerless `.vox` path (pinned in `tests/oki_wav_tag.rs`). The 3-bit
+  WAV-OKI mode the same table advertises (`wBitsPerSample = 3`) is **not**
+  implemented — the staged Dialogic app note specifies only the 4-bit
+  algorithm, so the 3-bit OKI recurrence has no normative source here.
 
 The adaptation / step tables are normative constants (uncopyrightable facts);
 the implementation was written from these spec descriptions without reading

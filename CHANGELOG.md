@@ -27,6 +27,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **OKI ADPCM WAV-tag routing (`WAVE_FORMAT_OKI_ADPCM` = `0x0010`).**
+  The `adpcm_dialogic` registration now also claims wave-format tag
+  `0x0010` and `Variant::Dialogic.wave_format_tag()` returns
+  `Some(0x0010)`. The OKI MSM6258/6585/6295 chip-set algorithm (the
+  `.vox` codec) has a WAV-container framing under this tag whose 4-bit
+  body is the canonical VOX layout (two samples per byte, high nibble
+  first), so a WAV demuxer that has parsed `WAVEFORMATEX::wFormatTag =
+  0x0010` resolves to this decoder by tag and decodes byte-identically to
+  the headerless `.vox` path. A new `tests/oki_wav_tag.rs` integration
+  suite pins the registry tag resolution and the byte-for-byte agreement
+  with the typed `dialogic::decode_packet` path; a new lib test
+  (`registry_resolves_each_wave_format_tag_to_its_variant`) pins every
+  accessor tag against the actual `register_codecs` wiring so the two
+  surfaces can't drift. Tag + framing sourced from the *OKI ADPCM Wave
+  Types* entry in the archived WAVE-format enumeration
+  (`docs/audio/adpcm/sdl_sound-wave-types.html`); the 4-bit recurrence is
+  the already-implemented Dialogic app-note algorithm. The 3-bit WAV-OKI
+  mode the same table advertises is left unimplemented (no normative
+  3-bit OKI recurrence is staged).
+
 - **Yamaha ADPCM-B chip-multiplier selection (AICA vs YM2608 OPNA).**
   The `adpcm_yamaha` family covers chips that round the
   quantization-width change rate `f(L3,L2,L1)` differently. The crate

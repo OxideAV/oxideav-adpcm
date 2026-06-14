@@ -148,16 +148,21 @@ impl Variant {
     /// - `Ms` → `0x0002` (`WAVE_FORMAT_ADPCM`).
     /// - `ImaWav` → `0x0011` (`WAVE_FORMAT_DVI_ADPCM`).
     /// - `Yamaha` → `0x0020` (`WAVE_FORMAT_YAMAHA_ADPCM`).
+    /// - `Dialogic` → `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) — the
+    ///   WAV-container framing of the OKI ADPCM chip-set algorithm whose
+    ///   headerless form is the `.vox` file. The 4-bit WAV-OKI body is
+    ///   the canonical VOX layout (two samples per byte, high nibble
+    ///   first), so the registry decoder handles it unchanged.
     ///
-    /// `None` for ADPCM-IMA-QT (QuickTime addresses it via a fourcc),
-    /// ADPCM-A (chip-internal — no WAV assignment) and Dialogic VOX
-    /// (headerless — no WAV assignment).
+    /// `None` for ADPCM-IMA-QT (QuickTime addresses it via a fourcc) and
+    /// ADPCM-A (chip-internal — no WAV assignment).
     pub const fn wave_format_tag(self) -> Option<u16> {
         match self {
             Variant::Ms => Some(0x0002),
             Variant::ImaWav => Some(0x0011),
             Variant::Yamaha => Some(0x0020),
-            Variant::ImaQt | Variant::YamahaA | Variant::Dialogic => None,
+            Variant::Dialogic => Some(0x0010),
+            Variant::ImaQt | Variant::YamahaA => None,
         }
     }
 

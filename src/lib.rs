@@ -75,7 +75,8 @@ pub const CODEC_ID_YAMAHA: &str = "adpcm_yamaha";
 /// format is chip-internal to the YM2608 rhythm ROM and YM2610 ADPCM-A
 /// channels.
 pub const CODEC_ID_YAMAHA_A: &str = "adpcm_yamaha_a";
-/// Canonical codec id for OKI / Dialogic ADPCM (`.vox`).
+/// Canonical codec id for OKI / Dialogic ADPCM (`.vox` and the
+/// WAV-container `WAVE_FORMAT_OKI_ADPCM` = `0x0010`).
 ///
 /// MSB-first nibble unpack (Dialogic VOX / MSM6295 ordering); 16-bit
 /// PCM output ([`dialogic::Output::Wide16`]); 12-bit silicon predictor
@@ -83,6 +84,12 @@ pub const CODEC_ID_YAMAHA_A: &str = "adpcm_yamaha_a";
 /// [`dialogic::decode_packet`] directly so the nibble order can be
 /// specified explicitly — the registry-resolved decoder commits to the
 /// canonical VOX layout.
+///
+/// The registration also carries WAV tag `0x0010` so a WAV demuxer that
+/// has parsed `WAVEFORMATEX::wFormatTag = WAVE_FORMAT_OKI_ADPCM` resolves
+/// to this codec by tag. That tag's 4-bit body is the canonical VOX
+/// layout (two samples per byte, high nibble first), so the existing
+/// decode path is byte-identical.
 pub const CODEC_ID_DIALOGIC: &str = "adpcm_dialogic";
 
 /// Register every ADPCM variant with `reg`. Decoders **and** encoders
@@ -148,7 +155,14 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .decoder(decoder::make_decoder)
             .encoder(encoder::make_encoder),
     );
-    // adpcm_dialogic — VOX (no canonical WAV tag; rate is out-of-band).
+    // adpcm_dialogic — OKI / Dialogic VOX. Headerless `.vox` files carry
+    // the sample rate out of band, but the same OKI MSM6258/6585/6295
+    // chip-set algorithm also has a WAV-container framing,
+    // WAVE_FORMAT_OKI_ADPCM = 0x0010 (SDL_sound "OKI ADPCM Wave Types":
+    // "created and read by the OKI ADPCM chip set"). The 4-bit WAV-OKI
+    // body is the canonical VOX layout — two samples per byte, high
+    // nibble first — which the registry decoder already produces, so the
+    // tag routes a WAV demuxer straight to this decoder.
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_DIALOGIC))
             .capabilities(
@@ -157,7 +171,8 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
                     .with_intra_only(false),
             )
             .decoder(decoder::make_decoder)
-            .encoder(encoder::make_encoder),
+            .encoder(encoder::make_encoder)
+            .tag(CodecTag::wave_format(0x0010)),
     );
 }
 
@@ -268,12 +283,40 @@ mod tests {
                 Some(0x0002) => assert_eq!(v, Variant::Ms),
                 Some(0x0011) => assert_eq!(v, Variant::ImaWav),
                 Some(0x0020) => assert_eq!(v, Variant::Yamaha),
+                Some(0x0010) => assert_eq!(v, Variant::Dialogic),
                 Some(other) => panic!("unexpected wave_format_tag {other:#06x} on {v:?}"),
                 None => assert!(
-                    matches!(v, Variant::ImaQt | Variant::YamahaA | Variant::Dialogic),
+                    matches!(v, Variant::ImaQt | Variant::YamahaA),
                     "{v:?} returned None from wave_format_tag but is not a tagless variant"
                 ),
             }
+        }
+    }
+
+    #[test]
+    fn registry_resolves_each_wave_format_tag_to_its_variant() {
+        // Every `Variant::wave_format_tag()` value must resolve through the
+        // registry to a codec id whose typed variant matches — i.e. the
+        // accessor and the actual `.tag(...)` wiring in `register_codecs`
+        // stay in lockstep. Catches a tag added to the accessor but not the
+        // registration (or vice versa).
+        use oxideav_core::{CodecTag, ProbeContext};
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        for &v in Variant::all() {
+            let Some(tag) = v.wave_format_tag() else {
+                continue;
+            };
+            let wf = CodecTag::wave_format(tag);
+            let id = reg
+                .resolve_tag_ref(&ProbeContext::new(&wf))
+                .unwrap_or_else(|| panic!("no codec registered for wave tag {tag:#06x} ({v:?})"));
+            let resolved = Variant::from_codec_id(id)
+                .unwrap_or_else(|| panic!("registered tag {tag:#06x} resolved to non-ADPCM id"));
+            assert_eq!(
+                resolved, v,
+                "wave tag {tag:#06x}: accessor says {v:?} but registry resolves {resolved:?}"
+            );
         }
     }
 
