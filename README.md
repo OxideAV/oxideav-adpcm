@@ -98,11 +98,14 @@ first 16 samples in each block (rather than always cold-starting):
   (a magnitude-4 nibble produces `diff = step/8 + step/4 = 0.375 × step`,
   so this seed places typical magnitudes near the midrange of the 16
   candidates), then pick the first IMA step-table entry ≥ that target.
-- **MS-ADPCM** — with the default predictor index 0 (coef1=256, coef2=0)
-  the decoder recurrence reduces to `sample1 + signed_nibble × delta`
-  with signed_nibble ∈ -8..=7, so seeding `delta ≈ mean_|Δ| / 4` places
-  typical magnitudes near the middle of the sweep. The seed is clamped
-  to `[16, 16384]` to honour the spec minimum and avoid runaway.
+- **MS-ADPCM** — the `delta` seed is derived from the index-0 reduction
+  (coef1=256, coef2=0, where the recurrence is `sample1 + signed_nibble ×
+  delta` with signed_nibble ∈ -8..=7), so seeding `delta ≈ mean_|Δ| / 4`
+  places typical magnitudes near the middle of the sweep. The seed is
+  clamped to `[16, 16384]` to honour the spec minimum and avoid runaway,
+  then shared across the per-block predictor search (above) — the search
+  adapts `delta` per the spec adaptation table regardless of which
+  predictor pair it is evaluating.
 
 On a 22.05 kHz 440 Hz amplitude-12000 sine these heuristics drop
 round-trip RMS by **63–88%** versus the cold-start seeds (MS mono
