@@ -1,7 +1,8 @@
 # oxideav-adpcm
 
-Pure-Rust decoder family for the common **ADPCM** (Adaptive Differential Pulse
-Code Modulation) audio formats found in WAV / AVI / QuickTime streams.
+Pure-Rust decoder + encoder family for the common **ADPCM** (Adaptive
+Differential Pulse Code Modulation) audio formats found in WAV / AVI /
+QuickTime / VOX / FM-synth streams.
 
 ## Supported codec ids
 
@@ -14,491 +15,142 @@ Code Modulation) audio formats found in WAV / AVI / QuickTime streams.
 | `adpcm_yamaha_a`  | Yamaha ADPCM-A (YM2608/YM2610 rhythm channels) | chip-internal; no WAV tag |
 | `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless) **and** WAV tag `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) |
 
-G.722 (WAV tag `0x0028`) and G.726/G.723.1/G.729 live in their own crates and
-are NOT re-implemented here.
+G.722 (WAV tag `0x0028`) and G.726 / G.723.1 / G.729 live in their own
+crates and are not re-implemented here.
 
 ## Status
 
-Decoders **and** encoders for all six supported codec ids:
+**Decoders and encoders for all six codec ids.** Output is i16-LE PCM.
 
-| Codec id          | Decoder | Encoder |
-|-------------------|---------|---------|
-| `adpcm_ms`        | yes     | yes     |
-| `adpcm_ima_wav`   | yes     | yes     |
-| `adpcm_ima_qt`    | yes     | yes     |
-| `adpcm_yamaha`    | yes     | yes     |
-| `adpcm_yamaha_a`  | yes     | yes     |
-| `adpcm_dialogic`  | yes     | yes     |
-
-The block-oriented WAV encoders (MS, IMA-WAV, IMA-QT) use the textbook
-decoder-loop search: for each input PCM sample they evaluate all 16
-candidate nibbles by simulating the decoder's recurrence forward, then
-emit the nibble whose reconstructed output minimises absolute error
-against the target. The **MS-ADPCM** encoder additionally performs a
-per-block predictor search: it trial-encodes each block under all seven
-spec predictor coefficient pairs (`AdaptCoeff1` / `AdaptCoeff2` rows
-0..=6) and writes the index that minimises total reconstruction error
-into the per-channel header byte. Since the index travels in the block
-header, the decode is identical regardless of which pair won — a pure
-quality gain, no wire-format change. On the reference 22.05 kHz 440 Hz
-amplitude-12000 sine (one 256-byte block) this drops single-block RMS
-from 100 (index-0 only) to **14** — an 86% reduction — because a clean
-tone is modelled far better by the second-order pair (index 1) than by
-plain first-order delta (index 0). Transient blocks still fall back to
-index 0 automatically. The stream-oriented encoders (Yamaha, Dialogic VOX)
-use closed-form quantisers derived directly from the spec's analysis
-recurrence — `sign(dn) | mag(|dn|/Δn)` against the 7-threshold ladder
-the manuals print. Both shapes are derived from the decoder recurrence
-already in this crate — no third-party encoder source was consulted.
-Round-trip RMS error for a 20 ms 440 Hz sine at 22.05 kHz stays below
-250 LSB across the block-oriented encoders, and under 3000 LSB for the
-stream-oriented encoders (where step state has to converge from cold
-start).
+The block-oriented WAV encoders (MS, IMA-WAV, IMA-QT) use the
+decoder-loop search — each input sample evaluates all candidate nibbles
+by simulating the decoder forward and emits the one minimising absolute
+error. The MS-ADPCM encoder additionally trial-encodes each block under
+all seven spec predictor coefficient pairs and writes the
+lowest-error index (a pure quality gain — the index travels in the block
+header so the decode is unchanged). All three block encoders seed their
+initial step state from the mean absolute first-difference of the first
+16 samples to suppress the per-block leading-edge transient. The
+stream-oriented encoders (Yamaha, Dialogic VOX) use closed-form
+quantisers derived from each spec's analysis recurrence.
 
 Default block size is 256 bytes per channel for the MS and IMA-WAV
-encoders (a common WAV-container choice at 22050 Hz mono); override
-via `MsEncoder::set_block_size` / `ImaWavEncoder::set_block_size`
-before the first `send_frame` call. The IMA-QT encoder uses the
-spec-mandated 34-byte-per-channel block — there is no `set_block_size`
-because the on-wire layout is fixed.
+encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
+34-byte-per-channel block (fixed layout, no override).
 
-### MS-ADPCM custom predictor coefficient sets (`wNumCoef` / `aCoeff[]`)
+### Notable format details
 
-The Microsoft ADPCM `WAVEFORMATEX` trailer (`ADPCMWAVEFORMAT`) declares
-`wNumCoef` predictor coefficient sets in `aCoeff[]`; a block's per-channel
-`bPredictor` byte is an **index into that table**, not a fixed 0..=6
-selector. Every stream starts with the seven mandatory presets, but an
-encoder may append further custom `(iCoef1, iCoef2)` pairs, in which case a
-block can carry a predictor index ≥ 7. The decoder now reads the trailer:
-pass the `WAVEFORMATEX` bytes that follow the 16/18-byte base in
-`CodecParameters::extradata` (`wSamplesPerBlock` u16 + `wNumCoef` u16 +
-`wNumCoef` × two i16-LE coefficients, all little-endian) and the
-registry-resolved `adpcm_ms` decoder resolves the full `aCoeff` table at
-construction. An empty trailer keeps the seven presets unchanged (the
-common case); a trailer that declares fewer than seven sets, truncates the
-table, or alters one of the mandatory presets is rejected at construction
-per the spec. The block-level entry points are
-`ms::decode_block` (standard presets) and the new
-`ms::decode_block_with_coeffs(block, channels, coeffs)`, with
-`ms::parse_extradata_coeffs` and `ms::STANDARD_COEFFS` exposed for callers
-that want to resolve the table themselves. The encoder continues to emit
-standard-preset indices (spec-legal for any decoder, since the first seven
-sets are invariant).
+- **MS-ADPCM custom predictor sets** — the decoder reads the
+  `ADPCMWAVEFORMAT` trailer (`wSamplesPerBlock`, `wNumCoef`, variable
+  `aCoeff[]`) from `CodecParameters::extradata`, so a block's
+  `bPredictor` byte can index custom coefficient pairs beyond the seven
+  mandatory presets. Block-level entry points: `ms::decode_block` and
+  `ms::decode_block_with_coeffs`, with `ms::parse_extradata_coeffs` /
+  `ms::STANDARD_COEFFS` exposed.
+- **3-bit IMA / DVI ADPCM** — WAV tag `0x0011` defines both 4-bit (the
+  default) and 3-bit code widths. The 3-bit mode shares the block header
+  and 89-entry step table but uses a 1-sign + 2-magnitude code, its own
+  8-entry index-adjust table, and a 12-byte-group channel interleave.
+  Reachable via `ima_wav::decode_block_3bit` /
+  `encoder::ima_encode_block_3bit`, `set_bits_per_sample(3)`, or the
+  `bits_per_sample` codec option.
+- **Yamaha ADPCM-B chip selection** — the `yamaha::Chip` selector on
+  `yamaha::Channel` picks the exact quantization-width-change-rate
+  constants: `Chip::Aica` (default, the WAV-tag-`0x0020` convention,
+  also Y8950 / YMZ280B) vs `Chip::Opna` (YM2608 OPNA Table 5-1). The two
+  tables live in `tables::YAMAHA_INDEX_SCALE` /
+  `tables::YAMAHA_INDEX_SCALE_OPNA`.
 
-### 3-bit IMA / DVI ADPCM (`wBitsPerSample = 3`)
+### Typed variant accessor
 
-WAV tag `0x0011` defines **two** code widths — 4-bit (the common case,
-and this crate's default) and 3-bit. The 3-bit mode shares the 4-byte
-per-channel block header and the 89-entry step table but uses a
-1-sign + 2-magnitude code (`diff = step/4 + (c&1 ? step/2 : 0) +
-(c&2 ? step : 0)`), its own 8-entry index-adjust table
-(`{-1, -1, 1, 2}`, sign-mirrored — `tables::IMA3_INDEX_ADJUST`), and a
-body that interleaves channels in **12-byte groups** (three 32-bit
-words = exactly 32 three-bit codes per channel, the smallest unit with
-zero padding waste — which is why the spec requires the per-channel
-data-word count to be a multiple of three). Codes are extracted 3 bits
-at a time from the least-significant end of the little-endian 96-bit
-group value, the same low-bits-first order the 4-bit layout uses for
-its nibbles. Each block emits `1 + groups × 32` samples per channel.
-
-Reachable three ways: the block-level
-`ima_wav::decode_block_3bit` / `encoder::ima_encode_block_3bit` pair,
-`ImaWavEncoder::set_bits_per_sample(3)` on the typed encoder, or the
-`bits_per_sample` codec option (`"3"` / `"4"`) on
-`CodecParameters::options` for the registry-resolved decoder *and*
-encoder. Unset keeps the 4-bit default; out-of-spec widths — and a
-3-bit request on any other (fixed-width) variant — are rejected at
-construction. The typed `Variant` framing accessors
-(`header_bytes` / `samples_per_block` / `block_size_bytes`) continue
-to describe the default 4-bit framing.
-
-To minimise the high-amplitude leading-edge transient inherent to
-per-block re-seeding, all three block-oriented encoders pick their
-initial step state from the mean absolute first-difference of the
-first 16 samples in each block (rather than always cold-starting):
-
-- **IMA-ADPCM-QT** / **IMA-ADPCM-WAV** — `target_step ≈ mean_|Δ| × 8 / 3`
-  (a magnitude-4 nibble produces `diff = step/8 + step/4 = 0.375 × step`,
-  so this seed places typical magnitudes near the midrange of the 16
-  candidates), then pick the first IMA step-table entry ≥ that target.
-- **MS-ADPCM** — the `delta` seed is derived from the index-0 reduction
-  (coef1=256, coef2=0, where the recurrence is `sample1 + signed_nibble ×
-  delta` with signed_nibble ∈ -8..=7), so seeding `delta ≈ mean_|Δ| / 4`
-  places typical magnitudes near the middle of the sweep. The seed is
-  clamped to `[16, 16384]` to honour the spec minimum and avoid runaway,
-  then shared across the per-block predictor search (above) — the search
-  adapts `delta` per the spec adaptation table regardless of which
-  predictor pair it is evaluating.
-
-On a 22.05 kHz 440 Hz amplitude-12000 sine these heuristics drop
-round-trip RMS by **63–88%** versus the cold-start seeds (MS mono
-271 → 100; MS stereo 207 → 86; IMA-WAV mono 413 → 88; IMA-WAV stereo
-634 → 78).
-
-### Yamaha ADPCM-B chip-multiplier selection (AICA vs OPNA)
-
-The `adpcm_yamaha` codec covers a family of chips (Y8950, YM2608-B,
-YMZ280B, AICA) that share the synthesis recurrence and the magnitude
-contribution lookup but round the **quantization-width change rate**
-`f(L3,L2,L1)` slightly differently. The two rounded constant sets the
-staged vendor datasheets print are:
-
-| Code | YM2608 OPNA Table 5-1 (`f`) | AICA / Y8950 (`f`) |
-|------|-----------------------------|--------------------|
-| 000…011 | 57/64  = 0.890625  | 115/128 = 0.8984375  |
-| 100     | 77/64  = 1.203125  | 1.19921875           |
-| 101     | 102/64 = 1.59375   | 1.59765625           |
-| 110     | 128/64 = 2.0       | 2.0                  |
-| 111     | 153/64 = 2.390625  | 2.3984375            |
-
-Decoded against the wrong constants a long stream slowly diverges (the
-per-step rounding compounds through the multiplicative step update). The
-[`yamaha::Chip`] selector on [`yamaha::Channel`] picks the exact set:
-
-```rust
-use oxideav_adpcm::yamaha::{Channel, Chip, decode_nibble};
-
-// Default: AICA / Y8950 / YMZ280B constants (integer/256, update >> 8).
-let mut aica = Channel::default();           // == Channel::for_chip(Chip::Aica)
-// YM2608 (OPNA) Application Manual Table 5-1 constants (×64, update >> 6).
-let mut opna = Channel::for_chip(Chip::Opna);
-
-let _ = decode_nibble(&mut aica, 0x7);
-let _ = decode_nibble(&mut opna, 0x7);
-```
-
-`Chip::Aica` is the default (the WAV-tag-`0x0020` convention); the
-registry-resolved `adpcm_yamaha` decoder/encoder uses it. The OPNA
-constants are reached by constructing channel state with
-`Channel::for_chip(Chip::Opna)` and driving `decode_nibble` /
-`decode_packet` / `encode_packet` directly — useful for chiptune /
-hardware-emulation callers reconstructing a YM2608 OPNA ADPCM-B stream
-bit-for-bit. The two tables live in `tables::YAMAHA_INDEX_SCALE`
-(AICA) and `tables::YAMAHA_INDEX_SCALE_OPNA` (OPNA, the Table 5-1 ×64
-numerators).
-
-## Typed variant accessor
-
-For callers that already know which ADPCM variant they want — a fixture
-loader pinning ADPCM-A; a WAV demuxer that has already parsed
-`WAVEFORMATEX::wFormatTag`; a unit test addressing exactly one decoder
-— the crate re-exports the dispatch enum at the crate root as
-[`oxideav_adpcm::Variant`] together with a small inspection surface:
-
-```rust
-use oxideav_adpcm::{Variant, CODEC_ID_MS};
-use oxideav_core::CodecId;
-
-// Round-trip a codec id through the typed enum.
-let v = Variant::from_codec_id(&CodecId::new(CODEC_ID_MS)).unwrap();
-assert_eq!(v.codec_id(), CODEC_ID_MS);
-
-// Container-layer tag inspection without re-typing the dispatch ladder.
-assert_eq!(Variant::Ms.wave_format_tag(),     Some(0x0002));
-assert_eq!(Variant::ImaWav.wave_format_tag(), Some(0x0011));
-assert_eq!(Variant::Yamaha.wave_format_tag(), Some(0x0020));
-assert_eq!(Variant::ImaQt.fourcc(),           Some(*b"ima4"));
-
-// Iterate every supported variant — exhaustiveness audits, table-
-// driven registration tests, configuration UIs.
-for &v in Variant::all() {
-    println!("{} ({:?})", v.codec_id(), v);
-}
-```
-
-A unit-test in `src/lib.rs` pins bit-for-bit agreement between
-`Variant::wave_format_tag()` / `Variant::fourcc()` and the tags that
-`register_codecs` actually wires into the registry, so a future
-ADPCM variant addition has to update both surfaces in lockstep.
-
-The same surface also classifies the on-wire framing shape and the
-channel-count ceiling each variant accepts:
+`oxideav_adpcm::Variant` is the dispatch enum re-exported at the crate
+root, with a const inspection surface for container layers:
 
 ```rust
 use oxideav_adpcm::{Shape, Variant};
 
-// Three block-oriented (WAV / AVI / QuickTime — per-block header re-seed)
-// vs three stream-oriented (Yamaha-A/B + Dialogic VOX — predictor and
-// step pointer carry across packets indefinitely) variants.
-assert_eq!(Variant::Ms.shape(),       Shape::BlockOriented);
-assert_eq!(Variant::ImaWav.shape(),   Shape::BlockOriented);
-assert_eq!(Variant::ImaQt.shape(),    Shape::BlockOriented);
-assert_eq!(Variant::Yamaha.shape(),   Shape::StreamOriented);
-assert_eq!(Variant::YamahaA.shape(),  Shape::StreamOriented);
-assert_eq!(Variant::Dialogic.shape(), Shape::StreamOriented);
+assert_eq!(Variant::Ms.wave_format_tag(),  Some(0x0002));
+assert_eq!(Variant::ImaQt.fourcc(),        Some(*b"ima4"));
+assert_eq!(Variant::Ms.shape(),            Shape::BlockOriented);
+assert_eq!(Variant::Yamaha.shape(),        Shape::StreamOriented);
+assert_eq!(Variant::Ms.max_channels(),     Some(2));
 
-// Maximum channel count the factory accepts. None == unbounded
-// (Yamaha DELTA-T is sample-level round-robin).
-assert_eq!(Variant::Ms.max_channels(),       Some(2));
-assert_eq!(Variant::ImaWav.max_channels(),   Some(8));
-assert_eq!(Variant::ImaQt.max_channels(),    Some(2));
-assert_eq!(Variant::Yamaha.max_channels(),   None);
-assert_eq!(Variant::YamahaA.max_channels(),  Some(1));
-assert_eq!(Variant::Dialogic.max_channels(), Some(2));
+// Block framing helpers (None for stream-oriented variants):
+assert_eq!(Variant::Ms.header_bytes(2),            Some(14));
+assert_eq!(Variant::Ms.samples_per_block(1, 256),  Some(500));
+assert_eq!(Variant::Ms.block_size_bytes(1, 500),   Some(256)); // inverse
 ```
 
-Two more lib-side tests pin `Variant::shape()` against the
-block-vs-stream partition (3 in each bucket — fails loudly if a new
-variant lands without being slotted), and `Variant::max_channels()`
-against what the registry's `make_decoder` actually accepts / rejects
-at the boundary (`max` works, `max + 1` is `Err`; zero is `Err` for
-every variant). The `Shape` enum is re-exported at the crate root so
-container layers can branch on framing without round-tripping through
-the `Variant` enum.
-
-For block-oriented variants the typed surface also exposes header
-size and per-block sample count so a container layer can fill the
-WAV `nBlockAlign` / `nSamplesPerBlock` fields (or size an output
-buffer up front) without re-implementing the spec formulas:
-
-```rust
-use oxideav_adpcm::Variant;
-
-// Header byte count per block, given a channel count. None for the
-// three stream-oriented variants (no per-block header) and ch=0.
-assert_eq!(Variant::Ms.header_bytes(1),     Some(7));
-assert_eq!(Variant::Ms.header_bytes(2),     Some(14));
-assert_eq!(Variant::ImaWav.header_bytes(1), Some(4));
-assert_eq!(Variant::ImaWav.header_bytes(2), Some(8));
-assert_eq!(Variant::ImaQt.header_bytes(1),  Some(2));
-assert_eq!(Variant::Yamaha.header_bytes(1), None); // stream-oriented
-
-// Per-channel sample count for one block of `block_bytes`. Returns
-// None for stream-oriented variants, zero / over-cap channels,
-// blocks shorter than the per-channel header, body bytes that
-// aren't a whole number of per-channel groups, and any off-spec
-// QuickTime block size (must equal 34 * channels).
-assert_eq!(Variant::Ms.samples_per_block(1, 256),     Some(500));
-assert_eq!(Variant::ImaWav.samples_per_block(1, 256), Some(505));
-assert_eq!(Variant::ImaQt.samples_per_block(1, 34),   Some(64));
-assert_eq!(Variant::ImaQt.samples_per_block(2, 68),   Some(64));
-assert_eq!(Variant::Yamaha.samples_per_block(1, 256), None);
-```
-
-The accessor is `const fn`. A lib-side test seeds the corresponding
-per-block decoder with a zero-content block at each pin point and
-asserts the actual decoded sample count matches what the accessor
-predicts — silently changing one without the other now breaks the
-test.
-
-The inverse direction is `Variant::block_size_bytes` — given a desired
-per-channel sample count it returns the block byte size (`nBlockAlign`)
-that decodes to exactly that many samples, so a muxer can pick a block
-size for a target `nSamplesPerBlock` without re-deriving the framing
-formula:
-
-```rust
-use oxideav_adpcm::Variant;
-
-// Inverse of samples_per_block: pick a block size for N samples/channel.
-assert_eq!(Variant::Ms.block_size_bytes(1, 500),     Some(256));
-assert_eq!(Variant::ImaWav.block_size_bytes(1, 505), Some(256));
-assert_eq!(Variant::ImaQt.block_size_bytes(1, 64),   Some(34));
-assert_eq!(Variant::ImaQt.block_size_bytes(2, 64),   Some(68));
-
-// None for stream-oriented variants and off-boundary sample counts
-// (MS needs (n-2)*ch even; IMA-WAV needs (n-1) divisible by 8; IMA-QT
-// is the fixed 64-sample block).
-assert_eq!(Variant::Ms.block_size_bytes(1, 3),       None);
-assert_eq!(Variant::ImaWav.block_size_bytes(1, 4),   None);
-assert_eq!(Variant::ImaQt.block_size_bytes(1, 63),   None);
-assert_eq!(Variant::Yamaha.block_size_bytes(1, 64),  None);
-```
-
-Two more lib-side tests pin the exact round-trip: every value returned
-by `block_size_bytes` feeds back through `samples_per_block` to the
-same sample count *and* through the per-block decoder to the same
-decoded length, plus a separate test enumerates the rejection paths.
+`Variant::all()` iterates every variant; `from_codec_id` / `codec_id`
+round-trip a codec id; `Shape` (block- vs stream-oriented) is also
+re-exported. Lib-side tests pin these accessors against what
+`register_codecs` and the per-block decoders actually do, so a new
+variant must update both surfaces in lockstep.
 
 ## Robustness
 
-`tests/decoder_fuzz.rs` enumerates structured-malformation coverage
-across all five variants: every out-of-spec predictor / step-index
-byte is rejected with `Err` (no panic); every prefix of a well-formed
-block is fed to the decoder to assert clean rejection of truncated
-inputs; a deterministic in-test LCG drives a few thousand
-pseudo-random bytes through each variant's `decode_packet`; and the
-trait-level `Decoder::send_packet` / `receive_frame` path is exercised
-on every variant with random packets. Property-style assertions also
-pin the spec-derived emitted-sample-count formulas (MS:
-`2 + body_bytes·2`; IMA-WAV: `1 + groups·8`; IMA-QT: `64·channels`;
-Yamaha / Dialogic: `2·packet_bytes`).
+`tests/decoder_fuzz.rs` and `tests/encoder_fuzz.rs` enumerate
+structured-malformation coverage across all six variants: out-of-spec
+predictor / step-index bytes, truncated-block prefixes, and
+pseudo-random byte streams through both the block-level and
+`Decoder` / `Encoder` trait paths — every input returns `Ok` or `Err`,
+never panics or overflows in a debug build. The MS decode/encode
+recurrences run in i64 with saturating multiplication + final clamp, and
+the Yamaha ADPCM-A path clamps `step_index` / `acc` to spec range on
+entry, so adversarial state emits bounded samples instead of panicking.
 
-The fuzz layer surfaced (and fixed) an integer-overflow path in
-`ms::decode_nibble`: an adversarial block header whose initial `delta`
-field was a large signed-i16 value could overflow the
-`MS_ADAPTATION[i] * delta` i32 multiplication after a handful of
-iterations. The recurrence now runs in i64 with saturating
-multiplication and a final clamp back to i32 — spec-compliant inputs
-are bit-identical (the existing oracle round-trip tests still pass)
-and hostile ones emit bounded samples instead of panicking.
-
-Encoder-side robustness is exercised by a sibling
-`tests/encoder_fuzz.rs` suite (17 deterministic never-panic tests
-across all six variants — adversarial PCM, off-size sample counts,
-out-of-spec encoder-state seeds, plus a registry-level pass covering
-zero-length frames + random-byte streams through `send_frame` +
-`flush`). That harness surfaced two latent panics carried over from
-the original encoder shape:
-
-- **MS-ADPCM encoder i32 overflow** in `ms_advance` /
-  `ms_simulate_nibble`. The `MS_ADAPTATION[n] * delta` product (mirror
-  of the decoder bug already fixed in the prior round) and the
-  `sample1 * coef1 + sample2 * coef2` predictor sum could overflow
-  i32 when the encoder's search loop drove `delta` into the millions
-  on adversarial PCM. Both products now run in i64 with saturating
-  multiplication and a final clamp back to i16 / i32 storage — the
-  encoder's existing round-trip tests are bit-identical, and the new
-  fuzz tests no longer panic.
-- **Yamaha ADPCM-A index-out-of-bounds** in `decode_nibble` /
-  `encode_sample`. A negative `step_index` field on a caller-supplied
-  `Channel` (the fuzz harness threads adversarial state directly into
-  this struct, mimicking long-stream resumption) was used as `usize`
-  to index `YAMAHA_A_STEP_SIZE`, wrapping to a huge index and
-  panicking. Both functions now clamp `step_index` + `acc` to their
-  spec ranges on entry — identical to the post-update clamp the same
-  function applies on the way out, so the recurrence is unaffected
-  for any well-shaped stream.
-
-## Benchmarks
-
-A Criterion harness lives at `benches/decode.rs` covering the
-per-block / per-packet decode hot path across all six variants — 11
-scenarios in total, spanning MS / IMA-WAV mono+stereo at 256-byte and
-512-byte block sizes, the fixed 34-byte IMA-QT block mono+stereo, the
-Yamaha ADPCM-B mono+stereo streaming path, the Yamaha ADPCM-A mono
-12→16-bit widening path, and both Dialogic VOX nibble orders
-(HiFirst/Wide16 + LoFirst/Native12). All inputs are synthesised
-in-bench from a deterministic xorshift32 seed: block-oriented variants
-build a valid encoded buffer via the crate's public encoder at setup
-time so the timed loop measures only the decoder, while
-stream-oriented variants feed the byte stream straight into
-`decode_packet`. No `docs/` fixtures or external files are read. Run
-with:
-
-    cargo bench -p oxideav-adpcm --bench decode
-
-The harness is intended as a stable A/B baseline for future
-optimisation rounds (block-aligned SIMD, per-sample LUT, no-bounds-
-check inner loops, predictor-fold rewrites) — the numbers themselves
-aren't pinned to any specific microarchitecture, only their relative
-ratios across crate versions.
-
-## Coverage-guided fuzzing
-
-In addition to the deterministic, hand-enumerated `tests/decoder_fuzz.rs`
-suite (run on every `cargo test`), a [`cargo-fuzz`][cargo-fuzz]
-harness under `fuzz/` exposes four libfuzzer targets so a long-running
-fuzz job can do coverage-guided exploration of the per-variant decode
-hot paths:
-
-| Target | Entry point under test |
-|--------|------------------------|
-| `decode_packet_ms` | `oxideav_adpcm::ms::decode_block` |
-| `decode_packet_ima_wav` | `oxideav_adpcm::ima_wav::decode_block` |
-| `decode_packet_ima_qt` | `oxideav_adpcm::ima_qt::decode_block` |
-| `decode_packet_stream` | Yamaha-A / Yamaha-B / Dialogic-VOX `decode_packet` (variant + state seed picked from the first 10 fuzz bytes) |
-| `encode_packet_ms` | `oxideav_adpcm::encoder::encode_block` (PCM in, MS-ADPCM block out; block size derived from the first 3 fuzz bytes) |
-| `encode_packet_ima_wav` | `oxideav_adpcm::encoder::ima_encode_block` (1..=8 channels; block size derived from the first 3 fuzz bytes) |
-| `encode_packet_ima_qt` | `oxideav_adpcm::encoder::ima_qt_encode_block` (fixed 64-samples-per-channel block; exercises the mean-\|Δ\| step-index heuristic against adversarial PCM) |
-| `encode_packet_stream` | Yamaha-A / Yamaha-B / Dialogic-VOX `encode_packet` (both nibble orders for Dialogic; both 12-bit widenings for ADPCM-A; state seed picked from the first 10 fuzz bytes) |
-
-Each target's contract is the same as the in-tree fuzz tests' — every
-byte slice must produce either `Ok(samples)` or `Err(Error::…)` (or, for
-the stream encoders, a finite `Vec<u8>`); never panic, debug-overflow,
-OOM, or index out of bounds. The stream-oriented targets additionally
-seed out-of-spec predictor + step-index values so the input-clamp paths
-fire on cold start.
-
-Run an individual target with a nightly toolchain:
+A coverage-guided [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html)
+harness under `fuzz/` exposes per-variant decode and encode targets:
 
     cd crates/oxideav-adpcm/fuzz
     cargo +nightly fuzz run decode_packet_ms
 
-[cargo-fuzz]: https://rust-fuzz.github.io/book/cargo-fuzz.html
+## Benchmarks
+
+A Criterion harness at `benches/decode.rs` covers the per-block /
+per-packet decode hot path across all six variants (11 scenarios). All
+inputs are synthesised in-bench from a deterministic seed — block
+variants build a valid buffer via the public encoder so the timed loop
+measures only the decoder. No fixtures are read.
+
+    cargo bench -p oxideav-adpcm --bench decode
 
 ## Specs followed
 
-Each variant was implemented from its **public normative spec**, not from any
-implementation:
+Each variant was implemented from its **public normative spec**, not
+from any implementation. The adaptation / step tables are normative
+constants (uncopyrightable facts).
 
-- **Microsoft ADPCM** — block header layout, `AdaptationTable`, `AdaptCoeff1`,
-  `AdaptCoeff2`, and the `predictor + nibble*delta` update rule as documented
-  on the [MultimediaWiki Microsoft ADPCM page](https://wiki.multimedia.cx/index.php/Microsoft_ADPCM)
-  (transcribing Microsoft's publicly-documented WAVEFORMATEX tag `0x0002`).
-  The `ADPCMWAVEFORMAT` trailer layout — `wSamplesPerBlock`, `wNumCoef`, and
-  the variable-length `aCoeff[]` table whose entries the per-block
-  `bPredictor` byte indexes (the first seven being the invariant presets) —
-  is transcribed from the *Microsoft ADPCM* entry of the archived WAVE-
-  format-type enumeration staged at
-  `docs/audio/adpcm/sdl_sound-wave-types.html`.
-- **IMA ADPCM** — the 89-entry step-size table and 16-entry index-adjust
-  table from the original Interactive Multimedia Association "Recommended
-  Practices for Digital Audio" (see
-  [MultimediaWiki IMA ADPCM](https://wiki.multimedia.cx/index.php/IMA_ADPCM)
-  for the spec transcription).
-- **Microsoft IMA ADPCM (WAV)** — block header + per-channel interleave
-  layout documented on
-  [MultimediaWiki Microsoft IMA ADPCM](https://wiki.multimedia.cx/index.php/Microsoft_IMA_ADPCM).
+- **Microsoft ADPCM** — block header, `AdaptationTable`, `AdaptCoeff1/2`,
+  and the `predictor + nibble*delta` update rule per the publicly
+  documented WAVEFORMATEX tag `0x0002`. The `ADPCMWAVEFORMAT` trailer
+  layout is transcribed from the archived WAVE-format-type enumeration
+  staged at `docs/audio/adpcm/sdl_sound-wave-types.html`.
+- **IMA ADPCM** — the 89-entry step-size and 16-entry index-adjust
+  tables from the Interactive Multimedia Association "Recommended
+  Practices for Digital Audio".
 - **3-bit IMA / DVI ADPCM** — the *DVI ADPCM Wave Type* specification
-  (Intel, 1992-12-16) as preserved in the archived WAVE-format-type
-  enumeration staged at `docs/audio/adpcm/sdl_sound-wave-types.html`:
-  3-bit decode/encode recurrence, the 8-entry 3-bit index table, and
-  the three-word (12-byte) per-channel data grouping. The document's
-  text fixes the group size (32 codes in exactly three 32-bit words,
-  codes crossing word boundaries with zero waste); the bit direction
-  within the group follows the same low-bits-first little-endian
-  convention the document's 4-bit layout uses.
-- **Apple QuickTime IMA ADPCM** — 34-byte fixed block, big-endian preamble
-  (9-bit predictor + 7-bit step index), block-level channel interleave, per
-  [MultimediaWiki Apple QuickTime IMA ADPCM](https://wiki.multimedia.cx/index.php/Apple_QuickTime_IMA_ADPCM).
-- **Yamaha ADPCM-B / DELTA-T** (`adpcm_yamaha`) — step-adaptation rate
-  table and `X(n+1) = X(n) + sign(L4) * (L3 + L2/2 + L1/4 + 1/8) * Δn`
-  update rule from Yamaha's public *Y8950 (MSX-AUDIO) Application
-  Manual*, section I-4 and Table I-2. See
-  [Y8950 manual PDF](https://map.grauw.nl/resources/sound/yamaha_y8950.pdf).
-- **Yamaha ADPCM-A** (`adpcm_yamaha_a`) — the YM2608 rhythm-ROM /
-  YM2610 ADPCM-A channel codec. 4-bit nibble (1 sign + 3 magnitude),
-  12-bit signed reconstructed acc clamped to `-2048..=2047`, 49-entry
-  step-size table (`16 .. 1552`, identical geometry to OKI Table 2) and
-  16-entry step-pointer adjustment `{-1,-1,-1,-1, 2, 5, 7, 9, ...}`.
-  Tables transcribed from `docs/audio/adpcm/yamaha/yamaha-adpcm.md` §3
-  (independent-RE consensus of the NeoGeo Development Wiki and the
-  MAME/ymfm hardware-RE effort, verified against real YM2608/YM2610
-  silicon — NOT from any general-purpose multimedia decoder). Single
-  channel per stream by chip design; the registry decoder + encoder
-  reject stereo with `Error::Unsupported`. 12→16-bit narrowing is
-  handled internally so consumers always see i16-LE PCM on output.
-- **OKI / Dialogic VOX ADPCM** — 49-entry calculated step-size table
-  (Table 2) and 8-entry magnitude-indexed step-pointer adjustment (the
-  row-collapsed form of Table 1) from Dialogic Corporation's *Dialogic
-  ADPCM Algorithm* application note, doc 00-1366-001 (1988); the same
-  decoder/encoder pseudocode (§2–§3) is transcribed directly from the
-  app note. Reconstructed predictor is 12-bit signed (`-2048..=2047`);
-  the registry-resolved decoder shifts to a full-range i16 on output,
-  while the raw 12-bit value remains available via `dialogic::Output::Native12`.
-  Dialogic VOX is **headerless** — `.vox` files carry no sample rate;
-  callers supply it out of band (commonly 6 kHz or 8 kHz for telephony).
-  The MSM6258's LSB-first nibble order is reachable via the lower-level
-  `dialogic::decode_packet(.., NibbleOrder::LoFirst, ..)` API. The same
-  OKI chip-set algorithm also has a WAV-container framing,
-  `WAVE_FORMAT_OKI_ADPCM` = `0x0010` (the *OKI ADPCM Wave Types* entry in
-  the archived WAVE-format-type enumeration at
-  `docs/audio/adpcm/sdl_sound-wave-types.html`: the format is "created
-  and read by the OKI ADPCM chip set"). Its 4-bit body is the canonical
-  VOX layout — two samples per byte, high nibble first — so the
-  `adpcm_dialogic` registration now also claims wave tag `0x0010`, and
-  `Variant::Dialogic.wave_format_tag()` returns `Some(0x0010)`. A WAV
-  demuxer that has parsed `WAVEFORMATEX::wFormatTag = 0x0010` therefore
-  resolves to this decoder by tag and decodes byte-identically to the
-  headerless `.vox` path (pinned in `tests/oki_wav_tag.rs`). The 3-bit
-  WAV-OKI mode the same table advertises (`wBitsPerSample = 3`) is **not**
-  implemented — the staged Dialogic app note specifies only the 4-bit
-  algorithm, so the 3-bit OKI recurrence has no normative source here.
-
-The adaptation / step tables are normative constants (uncopyrightable facts);
-the implementation was written from these spec descriptions without reading
-any decoder source.
+  (Intel, 1992) preserved at `docs/audio/adpcm/sdl_sound-wave-types.html`.
+- **Apple QuickTime IMA ADPCM** — 34-byte fixed block, big-endian 9-bit
+  predictor + 7-bit step-index preamble, block-level channel interleave.
+- **Yamaha ADPCM-B / DELTA-T** — step-adaptation rate table and the
+  `X(n+1) = X(n) + sign(L4)·(L3 + L2/2 + L1/4 + 1/8)·Δn` update rule from
+  Yamaha's public *Y8950 (MSX-AUDIO) Application Manual*, §I-4 / Table I-2.
+- **Yamaha ADPCM-A** — the YM2608 / YM2610 rhythm channel codec (4-bit
+  1-sign + 3-magnitude, 12-bit signed acc, 49-entry step table)
+  transcribed from `docs/audio/adpcm/yamaha/yamaha-adpcm.md` §3
+  (independent hardware-RE consensus verified against real silicon).
+  Single channel per stream by chip design; 12→16-bit narrowing handled
+  internally.
+- **OKI / Dialogic VOX ADPCM** — 49-entry step table and 8-entry
+  step-pointer adjustment from Dialogic Corporation's *Dialogic ADPCM
+  Algorithm* application note (doc 00-1366-001, 1988). Headerless `.vox`
+  (caller supplies sample rate) plus the `WAVE_FORMAT_OKI_ADPCM`
+  (`0x0010`) WAV framing, which decodes byte-identically. The MSM6258's
+  LSB-first nibble order is reachable via
+  `dialogic::decode_packet(.., NibbleOrder::LoFirst, ..)`; the raw 12-bit
+  value is available via `dialogic::Output::Native12`. The 3-bit OKI mode
+  is not implemented (the app note specifies only the 4-bit algorithm).
 
 ## License
 
