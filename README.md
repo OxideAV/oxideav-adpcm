@@ -149,7 +149,10 @@ constants (uncopyrightable facts).
   (`0x0010`) WAV framing, which decodes byte-identically. The MSM6258's
   LSB-first nibble order is reachable via
   `dialogic::decode_packet(.., NibbleOrder::LoFirst, ..)`; the raw 12-bit
-  value is available via `dialogic::Output::Native12`. The 3-bit OKI mode
+  value is available via `dialogic::Output::Native12`. The app note's
+  §5 stream-reset sequence — 24 bytes / 48 samples of alternating ±zero
+  codes that walk the step pointer to its floor without introducing a DC
+  offset — is produced by `dialogic::reset_preamble`. The 3-bit OKI mode
   is not implemented (the app note specifies only the 4-bit algorithm).
 
 ## License

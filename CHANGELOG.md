@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Other
+
+- Dialogic/OKI VOX §5 reset preamble (`dialogic::reset_preamble`) — the
+  spec-mandated 24-byte / 48-sample alternating ±zero-code sequence that
+  resets a stream to its initial conditions (step floor, no DC offset)
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.5...v0.0.6) - 2026-06-15
 
 ### Other

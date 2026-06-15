@@ -262,6 +262,46 @@ pub fn encode_packet_wide16(samples: &[i16], state: &mut Channel, order: NibbleO
     encode_packet(&narrowed, state, order)
 }
 
+/// Length in bytes of the reset preamble (§5: 24 bytes = 48 samples).
+pub const RESET_PREAMBLE_BYTES: usize = 24;
+
+/// Number of decoded samples the reset preamble produces (§5: 48 samples).
+pub const RESET_PREAMBLE_SAMPLES: usize = 48;
+
+/// Build the Dialogic §5 *reset preamble* — the 24-byte (48-sample)
+/// sequence of alternating plus/minus zero codes a `.vox` stream
+/// prepends to drive a fresh decoder back to its initial conditions.
+///
+/// Per the app note (§5): on reset the step size is the minimum (entry
+/// 1, value 16) and the waveform estimate `X = 0`. Because the decoder
+/// *always* adds the `ss/8` bias term (§2), a constant-sign zero stream
+/// would accumulate a DC reference; the spec therefore alternates the
+/// sign — the byte values `0x08` / `0x80` carry one `0000`b (`+0`) code
+/// and one `1000`b (`-0`) code each. Every zero code has magnitude 0, so
+/// the step-pointer adjustment is `−1` per sample (Table 1), walking the
+/// pointer down to its minimum; the alternating sign keeps the running
+/// `X` net-zero so no DC offset is introduced.
+///
+/// The returned bytes are laid out so the **decoded** sample order is
+/// `−0, +0, −0, +0, …` regardless of `order`: for [`NibbleOrder::HiFirst`]
+/// each byte is `0x80` (hi nibble `1000` decoded first), and for
+/// [`NibbleOrder::LoFirst`] each byte is `0x08` (lo nibble `1000`
+/// decoded first). Feeding the result through [`decode_packet`] from the
+/// default [`Channel`] therefore leaves the predictor at 0 and the step
+/// pointer at its minimum entry.
+pub fn reset_preamble(order: NibbleOrder) -> [u8; RESET_PREAMBLE_BYTES] {
+    // Pick the byte whose first-decoded nibble is the `-0` code (`1000`b)
+    // and whose second-decoded nibble is the `+0` code (`0000`b), so the
+    // decoded stream alternates -,+ starting on the minus side.
+    let byte = match order {
+        // HiFirst decodes the high nibble first: 0x80 = hi 1000, lo 0000.
+        NibbleOrder::HiFirst => 0x80u8,
+        // LoFirst decodes the low nibble first: 0x08 = lo 1000, hi 0000.
+        NibbleOrder::LoFirst => 0x08u8,
+    };
+    [byte; RESET_PREAMBLE_BYTES]
+}
+
 /// Reject obviously-invalid channel counts; used by the registry
 /// factories. Dialogic VOX is mono in practice; we permit up to 2
 /// channels for synthetic stereo material via nibble interleave.
@@ -417,6 +457,90 @@ mod tests {
         // pad — but the high nibble is the third sample's code, and
         // the low nibble is zero (pad).
         assert_eq!(bytes[1] & 0x0F, 0x00);
+    }
+
+    #[test]
+    fn reset_preamble_has_spec_length() {
+        assert_eq!(reset_preamble(NibbleOrder::HiFirst).len(), 24);
+        assert_eq!(RESET_PREAMBLE_BYTES, 24);
+        assert_eq!(RESET_PREAMBLE_SAMPLES, 48);
+        // §5 byte values: 0x80 for hi-first, 0x08 for lo-first.
+        assert!(reset_preamble(NibbleOrder::HiFirst)
+            .iter()
+            .all(|&b| b == 0x80));
+        assert!(reset_preamble(NibbleOrder::LoFirst)
+            .iter()
+            .all(|&b| b == 0x08));
+    }
+
+    #[test]
+    fn reset_preamble_decodes_to_alternating_minus_plus_zero() {
+        // From the reset state the preamble's first sample is the -0 code
+        // (-ss/8) and the second is the +0 code (+ss/8); with ss starting
+        // at 16 the magnitudes are ±2 and the running predictor never
+        // drifts away from 0 by more than one ss/8.
+        for order in [NibbleOrder::HiFirst, NibbleOrder::LoFirst] {
+            let bytes = reset_preamble(order);
+            let pcm = decode_packet(&bytes, &mut [Channel::default()], order, Output::Native12);
+            assert_eq!(pcm.len(), RESET_PREAMBLE_SAMPLES);
+            // Decoded order is -,+,-,+ ...: even indices negative-or-zero,
+            // odd indices positive-or-zero, and each |sample| is small.
+            for (i, &s) in pcm.iter().enumerate() {
+                if i % 2 == 0 {
+                    assert!(s <= 0, "sample {i} ({s}) should be the -0 code");
+                } else {
+                    assert!(s >= 0, "sample {i} ({s}) should be the +0 code");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reset_preamble_walks_step_pointer_to_floor() {
+        // §5: the preamble's magnitude-0 codes each adjust the step pointer
+        // by -1 (Table 1), so from ANY starting pointer 48 samples drive it
+        // to OKI_STEP_INDEX_MIN. (The predictor is NOT mass-corrected — the
+        // OKI recurrence is purely additive, so a real reset sets X=0 first;
+        // the preamble's job is to floor the step and avoid building DC, not
+        // to cancel a pre-existing offset.)
+        for order in [NibbleOrder::HiFirst, NibbleOrder::LoFirst] {
+            let mut st = Channel {
+                predictor: 500,
+                step_index: 30,
+            };
+            let bytes = reset_preamble(order);
+            let _ = decode_packet(
+                &bytes,
+                std::slice::from_mut(&mut st),
+                order,
+                Output::Native12,
+            );
+            assert_eq!(st.step_index, OKI_STEP_INDEX_MIN);
+        }
+    }
+
+    #[test]
+    fn reset_preamble_introduces_no_dc_from_fresh_state() {
+        // §5's DC-neutrality guarantee: from the spec reset state (X=0)
+        // the preamble keeps the predictor net-zero — the alternating
+        // ±ss/8 pairs cancel, leaving at most one trailing ss/8 residue
+        // (ss=16 at the floor → ±2).
+        for order in [NibbleOrder::HiFirst, NibbleOrder::LoFirst] {
+            let mut st = Channel::default();
+            let bytes = reset_preamble(order);
+            let _ = decode_packet(
+                &bytes,
+                std::slice::from_mut(&mut st),
+                order,
+                Output::Native12,
+            );
+            assert_eq!(st.step_index, OKI_STEP_INDEX_MIN);
+            assert!(
+                st.predictor.abs() <= 2,
+                "predictor {} drifted (DC introduced)",
+                st.predictor
+            );
+        }
     }
 
     #[test]
