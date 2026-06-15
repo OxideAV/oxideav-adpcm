@@ -62,6 +62,29 @@ before the first `send_frame` call. The IMA-QT encoder uses the
 spec-mandated 34-byte-per-channel block — there is no `set_block_size`
 because the on-wire layout is fixed.
 
+### MS-ADPCM custom predictor coefficient sets (`wNumCoef` / `aCoeff[]`)
+
+The Microsoft ADPCM `WAVEFORMATEX` trailer (`ADPCMWAVEFORMAT`) declares
+`wNumCoef` predictor coefficient sets in `aCoeff[]`; a block's per-channel
+`bPredictor` byte is an **index into that table**, not a fixed 0..=6
+selector. Every stream starts with the seven mandatory presets, but an
+encoder may append further custom `(iCoef1, iCoef2)` pairs, in which case a
+block can carry a predictor index ≥ 7. The decoder now reads the trailer:
+pass the `WAVEFORMATEX` bytes that follow the 16/18-byte base in
+`CodecParameters::extradata` (`wSamplesPerBlock` u16 + `wNumCoef` u16 +
+`wNumCoef` × two i16-LE coefficients, all little-endian) and the
+registry-resolved `adpcm_ms` decoder resolves the full `aCoeff` table at
+construction. An empty trailer keeps the seven presets unchanged (the
+common case); a trailer that declares fewer than seven sets, truncates the
+table, or alters one of the mandatory presets is rejected at construction
+per the spec. The block-level entry points are
+`ms::decode_block` (standard presets) and the new
+`ms::decode_block_with_coeffs(block, channels, coeffs)`, with
+`ms::parse_extradata_coeffs` and `ms::STANDARD_COEFFS` exposed for callers
+that want to resolve the table themselves. The encoder continues to emit
+standard-preset indices (spec-legal for any decoder, since the first seven
+sets are invariant).
+
 ### 3-bit IMA / DVI ADPCM (`wBitsPerSample = 3`)
 
 WAV tag `0x0011` defines **two** code widths — 4-bit (the common case,
@@ -403,6 +426,12 @@ implementation:
   `AdaptCoeff2`, and the `predictor + nibble*delta` update rule as documented
   on the [MultimediaWiki Microsoft ADPCM page](https://wiki.multimedia.cx/index.php/Microsoft_ADPCM)
   (transcribing Microsoft's publicly-documented WAVEFORMATEX tag `0x0002`).
+  The `ADPCMWAVEFORMAT` trailer layout — `wSamplesPerBlock`, `wNumCoef`, and
+  the variable-length `aCoeff[]` table whose entries the per-block
+  `bPredictor` byte indexes (the first seven being the invariant presets) —
+  is transcribed from the *Microsoft ADPCM* entry of the archived WAVE-
+  format-type enumeration staged at
+  `docs/audio/adpcm/sdl_sound-wave-types.html`.
 - **IMA ADPCM** — the 89-entry step-size table and 16-entry index-adjust
   table from the original Interactive Multimedia Association "Recommended
   Practices for Digital Audio" (see

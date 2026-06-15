@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MS-ADPCM custom predictor coefficient sets (`wNumCoef` / `aCoeff[]`).**
+  The Microsoft ADPCM `WAVEFORMATEX` trailer (`ADPCMWAVEFORMAT`) declares
+  the predictor coefficient table, and a block's `bPredictor` byte indexes
+  into it. The decoder previously hard-coded the seven standard presets and
+  rejected any index ≥ 7; it now parses the trailer from
+  `CodecParameters::extradata` (`wSamplesPerBlock` + `wNumCoef` +
+  `wNumCoef` × two i16-LE coefficients) and decodes blocks that address
+  custom coefficient sets. An empty trailer keeps the seven presets; a
+  trailer declaring fewer than seven sets, truncating the table, or
+  altering a mandatory preset is rejected at decoder construction. New
+  public surface: `ms::decode_block_with_coeffs`,
+  `ms::parse_extradata_coeffs`, `ms::STANDARD_COEFFS`, `ms::CoefPair`.
+  Derived from the Microsoft ADPCM `ADPCMWAVEFORMAT` spec; no external
+  decoder consulted.
 - **OKI ADPCM WAV-tag routing (`WAVE_FORMAT_OKI_ADPCM` = `0x0010`).**
   The `adpcm_dialogic` registration now also claims wave-format tag
   `0x0010` and `Variant::Dialogic.wave_format_tag()` returns

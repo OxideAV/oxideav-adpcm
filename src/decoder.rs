@@ -492,11 +492,21 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
             }
         }
     }
+    // Microsoft ADPCM may declare custom predictor coefficient sets in its
+    // WAVEFORMATEX trailer (`wNumCoef` / `aCoeff[]`); a per-block predictor
+    // index can then point at a custom set (>= 7). Resolve the table once
+    // from `extradata`; an empty trailer keeps the 7 standard presets.
+    let ms_coeffs = if variant == Variant::Ms {
+        ms::parse_extradata_coeffs(&params.extradata)?
+    } else {
+        None
+    };
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
         variant,
         channels,
         ima_bits,
+        ms_coeffs,
         pending: None,
         yamaha_state: vec![yamaha::Channel::default(); channels as usize],
         yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
@@ -518,6 +528,10 @@ pub struct AdpcmDecoder {
     // IMA-WAV code width: 4 (default) or 3, from the `bits_per_sample`
     // codec option. Unused by the other variants.
     ima_bits: u8,
+    // Microsoft-ADPCM resolved `aCoeff` table. `None` ⇒ the 7 standard
+    // presets ([`ms::STANDARD_COEFFS`]); `Some` ⇒ a custom table parsed
+    // from the WAVEFORMATEX trailer. Unused by the other variants.
+    ms_coeffs: Option<Vec<ms::CoefPair>>,
     pending: Option<PendingFrame>,
     // Yamaha carries state across packets; the other block-oriented
     // variants re-seed per block.
@@ -542,7 +556,10 @@ impl AdpcmDecoder {
         }
         let channels = self.channels as usize;
         let pcm = match self.variant {
-            Variant::Ms => ms::decode_block(&pkt.data, channels)?,
+            Variant::Ms => match &self.ms_coeffs {
+                Some(coeffs) => ms::decode_block_with_coeffs(&pkt.data, channels, coeffs)?,
+                None => ms::decode_block(&pkt.data, channels)?,
+            },
             Variant::ImaWav if self.ima_bits == 3 => {
                 ima_wav::decode_block_3bit(&pkt.data, channels)?
             }
