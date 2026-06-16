@@ -109,6 +109,15 @@ recurrences run in i64 with saturating multiplication + final clamp, and
 the Yamaha ADPCM-A path clamps `step_index` / `acc` to spec range on
 entry, so adversarial state emits bounded samples instead of panicking.
 
+`tests/wav_decode.rs` additionally runs each WAV-tagged variant (MS,
+IMA-WAV, Yamaha) and the QuickTime `ima4` variant end-to-end against an
+opaque validator: a sine fixture is encoded by the validator, decoded by
+our decoder, and cross-correlated (> 0.98) against the validator's own
+PCM dump. The `ima4` path has no WAV tag, so its fixture is a CAF
+container and the harness pulls the raw 34-byte `ima4` blocks straight
+out of the CAF `data` chunk before feeding the decoder. Fixtures are
+generated on demand and skipped when the validator binary is absent.
+
 A coverage-guided [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html)
 harness under `fuzz/` exposes per-variant decode and encode targets:
 

@@ -7,6 +7,11 @@
 //! decoded sample count matches the reference, and the magnitudes track
 //! each other (cross-correlation at lag 0 is high).
 //!
+//! The WAV-tagged variants (MS, IMA-WAV, Yamaha) come through `.wav`
+//! fixtures; the QuickTime `ima4` variant has no WAV tag, so its oracle
+//! fixture is a CAF container and the harness pulls the raw `ima4`
+//! payload out of the CAF `data` chunk before feeding our decoder.
+//!
 //! Fixtures are generated on demand — see `ensure_fixtures()`. If
 //! `ffmpeg` is not on $PATH, the tests are skipped with a harmless
 //! `eprintln!`; CI uses `ubuntu-latest` images which ship ffmpeg.
@@ -15,7 +20,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use oxideav_adpcm::{ima_wav, ms, yamaha, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA};
+use oxideav_adpcm::{
+    ima_wav, ms, yamaha, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA,
+};
 use oxideav_core::CodecRegistry;
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
 
@@ -451,4 +458,146 @@ fn block_align_zero_is_rejected() {
     let mut reg = CodecRegistry::new();
     oxideav_adpcm::register_codecs(&mut reg);
     assert!(reg.first_decoder(&params).is_err());
+}
+
+// ---------------------------------------------------------------------------
+// IMA-QT (`adpcm_ima_qt`, QuickTime `ima4`) end-to-end validator coverage.
+//
+// Unlike MS / IMA-WAV / Yamaha, the QuickTime IMA variant has no WAV tag —
+// the reference oracle emits it inside a CAF (Core Audio Format) container.
+// The harness pulls the raw `ima4` codec bytes straight out of the CAF
+// `data` chunk (a flat sequence of fixed 34-byte blocks, exactly what our
+// decoder consumes) and feeds them through the registry decoder. ffmpeg is
+// used only as an opaque oracle: its CAF bytes go in, its PCM dump is the
+// comparison target, and its source is never consulted.
+// ---------------------------------------------------------------------------
+
+/// Build a CAF fixture containing an `adpcm_ima_qt` mono sine (and the PCM
+/// reference ffmpeg decodes it back to). Returns `(caf, ref_pcm)` paths,
+/// or `None` when ffmpeg is unavailable.
+fn ensure_ima_qt_fixtures() -> Option<(PathBuf, PathBuf)> {
+    let caf = ensure_fixture("sine_adpcm_ima_qt.caf", || {
+        let out = fixtures_dir().join("sine_adpcm_ima_qt.caf");
+        Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.5:sample_rate=22050",
+                "-c:a",
+                "adpcm_ima_qt",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })?;
+    let ref_pcm = ensure_fixture("sine_adpcm_ima_qt.pcm", || {
+        let out = fixtures_dir().join("sine_adpcm_ima_qt.pcm");
+        Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-i",
+                caf.to_str().unwrap(),
+                "-f",
+                "s16le",
+                "-ar",
+                "22050",
+                "-ac",
+                "1",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })?;
+    Some((caf, ref_pcm))
+}
+
+/// Pull the raw codec payload out of a CAF file's `data` chunk.
+///
+/// CAF layout: an 8-byte file header (`caff` + version/flags), then a run
+/// of chunks each `[4-byte type][8-byte big-endian size][body]`. The
+/// `data` chunk body starts with a 4-byte "edit count" the spec mandates,
+/// followed by the raw codec bytes. We locate `data` by FourCC, read its
+/// big-endian size, and return the body past the edit-count prefix.
+fn extract_caf_data_chunk(bytes: &[u8]) -> Vec<u8> {
+    assert_eq!(&bytes[0..4], b"caff", "not a CAF file");
+    let mut off = 8usize;
+    while off + 12 <= bytes.len() {
+        let id = &bytes[off..off + 4];
+        let size = i64::from_be_bytes([
+            bytes[off + 4],
+            bytes[off + 5],
+            bytes[off + 6],
+            bytes[off + 7],
+            bytes[off + 8],
+            bytes[off + 9],
+            bytes[off + 10],
+            bytes[off + 11],
+        ]);
+        let body = off + 12;
+        // CAF permits size = -1 ("until EOF") only for the final data
+        // chunk; ffmpeg always writes a concrete size here, so treat a
+        // negative/oversized value as "rest of file".
+        let end = if size < 0 || body + size as usize > bytes.len() {
+            bytes.len()
+        } else {
+            body + size as usize
+        };
+        if id == b"data" {
+            // Skip the 4-byte mEditCount prefix.
+            return bytes[body + 4..end].to_vec();
+        }
+        off = end;
+    }
+    panic!("CAF file has no data chunk");
+}
+
+#[test]
+fn ima_qt_adpcm_vs_ffmpeg_reference() {
+    let Some((caf_path, ref_path)) = ensure_ima_qt_fixtures() else {
+        return;
+    };
+    let caf = fs::read(&caf_path).unwrap();
+    let raw = extract_caf_data_chunk(&caf);
+    // The mono `ima4` payload is a flat run of 34-byte blocks.
+    assert!(
+        raw.len() % 34 == 0,
+        "ima4 payload {} not a multiple of 34",
+        raw.len()
+    );
+
+    let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_IMA_QT));
+    params.sample_rate = Some(22050);
+    params.channels = Some(1);
+    let mut reg = CodecRegistry::new();
+    oxideav_adpcm::register_codecs(&mut reg);
+    let mut dec = reg.first_decoder(&params).expect("ima_qt decoder");
+    let tb = TimeBase::new(1, 22050);
+
+    // Feed the whole payload as one packet — the decoder splits it into
+    // its fixed 34-byte blocks internally.
+    dec.send_packet(&Packet::new(0, tb, raw)).unwrap();
+    let Frame::Audio(af) = dec.receive_frame().unwrap() else {
+        panic!("expected audio frame");
+    };
+    let ours: Vec<i16> = af.data[0]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+
+    let reference = load_pcm(&ref_path);
+    let expected = reference.len();
+    let got = ours.len();
+    assert!(
+        (got as i64 - expected as i64).abs() <= (expected as i64 / 100 + 64),
+        "adpcm_ima_qt: sample count drift — ours {got} vs ref {expected}",
+    );
+    let score = xcorr(&ours, &reference);
+    assert!(
+        score > 0.98,
+        "adpcm_ima_qt: low waveform similarity with ffmpeg reference: {score:.4}",
+    );
 }

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- IMA-QT (`adpcm_ima_qt`, QuickTime `ima4`) end-to-end validator
+  coverage — a new integration test decodes a CAF-carried `ima4` sine
+  (raw blocks pulled from the CAF `data` chunk) and cross-correlates the
+  result against the oracle's own PCM decode (> 0.98), closing the last
+  decoder variant that had only hand-block unit coverage. The oracle is
+  used purely as an opaque byte source.
 - Multi-block packet decode for MS / IMA-WAV (4-bit + 3-bit) — a packet
   carrying several concatenated blocks (whole WAV `data` chunk, AVI audio
   chunk, large read buffer) is now split into its constituent blocks via

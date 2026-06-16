@@ -12,6 +12,7 @@
 tests/fixtures/*.avi
 tests/fixtures/*.wav
 tests/fixtures/*.mov
+tests/fixtures/*.caf
 tests/fixtures/*.pcm
 
 # Cargo-fuzz build + corpus artefacts (the harness sources under
