@@ -308,7 +308,8 @@ fn yamaha_empty_packet() {
 // MS / IMA-WAV blocks (a whole WAV `data` chunk, an AVI audio chunk, a
 // large read buffer) must get every block back, not just the first. The
 // `block_align` codec option tells the block-oriented decoders the WAV
-// `nBlockAlign` so they split the packet. These tests do not need ffmpeg.
+// `nBlockAlign` so they split the packet. These tests are self-contained
+// (synthesised blocks decoded in-crate; no external validator involved).
 
 use oxideav_adpcm::encoder::{encode_block as ms_encode_block, ima_encode_block};
 
