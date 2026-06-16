@@ -301,3 +301,153 @@ fn yamaha_empty_packet() {
     let out = yamaha::decode_packet(&[], &mut st);
     assert!(out.is_empty());
 }
+
+// --- multi-block packet decoding (block_align option) -------------------
+//
+// A demuxer that hands the decoder a packet spanning several concatenated
+// MS / IMA-WAV blocks (a whole WAV `data` chunk, an AVI audio chunk, a
+// large read buffer) must get every block back, not just the first. The
+// `block_align` codec option tells the block-oriented decoders the WAV
+// `nBlockAlign` so they split the packet. These tests do not need ffmpeg.
+
+use oxideav_adpcm::encoder::{encode_block as ms_encode_block, ima_encode_block};
+
+fn ramp_pcm(n: usize) -> Vec<i16> {
+    // A gentle deterministic waveform (triangle ramp) so each block has
+    // real signal and the predictor actually moves.
+    (0..n)
+        .map(|i| {
+            let t = (i % 128) as i32;
+            let v = if t < 64 { t - 32 } else { 96 - t };
+            (v * 200) as i16
+        })
+        .collect()
+}
+
+fn decode_one_packet(codec_id: &str, block_align: usize, data: Vec<u8>) -> Vec<i16> {
+    let mut params = CodecParameters::audio(CodecId::new(codec_id));
+    params.sample_rate = Some(22050);
+    params.channels = Some(1);
+    params
+        .options
+        .insert("block_align".to_string(), block_align.to_string());
+    let mut reg = CodecRegistry::new();
+    oxideav_adpcm::register_codecs(&mut reg);
+    let mut dec = reg.first_decoder(&params).expect("decoder");
+    let tb = TimeBase::new(1, 22050);
+    let pkt = Packet::new(0, tb, data);
+    dec.send_packet(&pkt).unwrap();
+    let Frame::Audio(af) = dec.receive_frame().unwrap() else {
+        panic!("expected audio frame");
+    };
+    af.data[0]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect()
+}
+
+#[test]
+fn ms_multi_block_packet_decodes_every_block() {
+    let block_size = 256usize; // bytes per block, mono
+                               // samples/channel for an MS block of `block_size` bytes:
+                               //   (block_size - 7) * 2 + 2
+    let spb = (block_size - 7) * 2 + 2;
+    let n_blocks = 4;
+    let pcm = ramp_pcm(spb * n_blocks);
+
+    // Build the concatenated block stream + the per-block reference decode.
+    let mut stream = Vec::new();
+    let mut reference = Vec::new();
+    for chunk in pcm.chunks(spb) {
+        let blk = ms_encode_block(chunk, 1, block_size).unwrap();
+        assert_eq!(blk.len(), block_size);
+        reference.extend(ms::decode_block(&blk, 1).unwrap());
+        stream.extend_from_slice(&blk);
+    }
+
+    let got = decode_one_packet(CODEC_ID_MS, block_size, stream);
+    assert_eq!(
+        got.len(),
+        spb * n_blocks,
+        "MS multi-block decode produced {} samples, expected {}",
+        got.len(),
+        spb * n_blocks
+    );
+    assert_eq!(
+        got, reference,
+        "MS multi-block decode diverged from per-block"
+    );
+}
+
+#[test]
+fn ima_wav_multi_block_packet_decodes_every_block() {
+    let block_size = 256usize; // bytes per block, mono
+                               // IMA-WAV mono: 4-byte header + (block_size-4) body bytes × 2 nibbles
+                               // = 1 (seed) + (block_size-4)*2 samples per block.
+    let spb = 1 + (block_size - 4) * 2;
+    let n_blocks = 4;
+    let pcm = ramp_pcm(spb * n_blocks);
+
+    let mut stream = Vec::new();
+    let mut reference = Vec::new();
+    for chunk in pcm.chunks(spb) {
+        let blk = ima_encode_block(chunk, 1, block_size).unwrap();
+        assert_eq!(blk.len(), block_size);
+        reference.extend(ima_wav::decode_block(&blk, 1).unwrap());
+        stream.extend_from_slice(&blk);
+    }
+
+    let got = decode_one_packet(CODEC_ID_IMA_WAV, block_size, stream);
+    assert_eq!(
+        got.len(),
+        spb * n_blocks,
+        "IMA-WAV multi-block decode produced {} samples, expected {}",
+        got.len(),
+        spb * n_blocks
+    );
+    assert_eq!(
+        got, reference,
+        "IMA-WAV multi-block decode diverged from per-block"
+    );
+}
+
+#[test]
+fn block_align_absent_decodes_single_block_unchanged() {
+    // Without the block_align option a single-block packet still decodes
+    // exactly as the per-block path (back-compatibility).
+    let block_size = 128usize;
+    let spb = (block_size - 7) * 2 + 2;
+    let pcm = ramp_pcm(spb);
+    let blk = ms_encode_block(&pcm, 1, block_size).unwrap();
+    let reference = ms::decode_block(&blk, 1).unwrap();
+
+    let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_MS));
+    params.sample_rate = Some(22050);
+    params.channels = Some(1);
+    let mut reg = CodecRegistry::new();
+    oxideav_adpcm::register_codecs(&mut reg);
+    let mut dec = reg.first_decoder(&params).expect("decoder");
+    let tb = TimeBase::new(1, 22050);
+    dec.send_packet(&Packet::new(0, tb, blk)).unwrap();
+    let Frame::Audio(af) = dec.receive_frame().unwrap() else {
+        panic!("audio frame");
+    };
+    let got: Vec<i16> = af.data[0]
+        .chunks_exact(2)
+        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    assert_eq!(got, reference);
+}
+
+#[test]
+fn block_align_zero_is_rejected() {
+    let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_MS));
+    params.sample_rate = Some(22050);
+    params.channels = Some(1);
+    params
+        .options
+        .insert("block_align".to_string(), "0".to_string());
+    let mut reg = CodecRegistry::new();
+    oxideav_adpcm::register_codecs(&mut reg);
+    assert!(reg.first_decoder(&params).is_err());
+}

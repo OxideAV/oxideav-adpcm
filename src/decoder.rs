@@ -501,12 +501,30 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     } else {
         None
     };
+    // `block_align` codec option — the WAV `nBlockAlign` (bytes per block,
+    // summed over all channels). When the demuxer passes it, the
+    // block-oriented MS / IMA-WAV decoders split a multi-block packet into
+    // its constituent blocks; without it the packet is decoded as one
+    // block (the prior behaviour). Stream-oriented variants ignore it.
+    let block_align: Option<usize> = match params.options.get("block_align") {
+        Some(v) => {
+            let n: usize = v.parse().map_err(|_| {
+                Error::invalid(format!("adpcm: block_align option {v:?} is not a number"))
+            })?;
+            if n == 0 {
+                return Err(Error::invalid("adpcm: block_align option must be non-zero"));
+            }
+            Some(n)
+        }
+        None => None,
+    };
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
         variant,
         channels,
         ima_bits,
         ms_coeffs,
+        block_align,
         pending: None,
         yamaha_state: vec![yamaha::Channel::default(); channels as usize],
         yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
@@ -532,6 +550,15 @@ pub struct AdpcmDecoder {
     // presets ([`ms::STANDARD_COEFFS`]); `Some` ⇒ a custom table parsed
     // from the WAVEFORMATEX trailer. Unused by the other variants.
     ms_coeffs: Option<Vec<ms::CoefPair>>,
+    // WAV `nBlockAlign` (bytes per block, all channels) from the
+    // `block_align` codec option. When set, a packet carrying several
+    // concatenated MS / IMA-WAV blocks is split into that many per-block
+    // decodes (each block re-seeds the predictor from its own header).
+    // `None` keeps the historical behaviour: the whole packet is treated
+    // as a single block, correct only when the producer already split the
+    // stream one-block-per-packet. The QuickTime IMA path derives its own
+    // fixed 34-byte block and ignores this field.
+    block_align: Option<usize>,
     pending: Option<PendingFrame>,
     // Yamaha carries state across packets; the other block-oriented
     // variants re-seed per block.
@@ -545,6 +572,35 @@ pub struct AdpcmDecoder {
 }
 
 impl AdpcmDecoder {
+    /// Decode a (possibly multi-block) packet of a block-oriented variant.
+    ///
+    /// `decode_one` decodes exactly one block (`bytes`, `channels`) into
+    /// interleaved i16. When `self.block_align` is `Some(n)` and the packet
+    /// is longer than one block, the packet is split into `n`-byte blocks
+    /// (a shorter trailing remainder is decoded as a final block) and the
+    /// per-block PCM is concatenated. When `block_align` is `None`, the
+    /// whole packet is handed to `decode_one` as a single block — the
+    /// historical behaviour, exact when the producer already framed one
+    /// block per packet.
+    fn decode_blocked<F>(&self, data: &[u8], channels: usize, decode_one: F) -> Result<Vec<i16>>
+    where
+        F: Fn(&[u8], usize) -> Result<Vec<i16>>,
+    {
+        match self.block_align {
+            Some(blk) if data.len() > blk => {
+                let mut out = Vec::new();
+                let mut off = 0;
+                while off < data.len() {
+                    let end = (off + blk).min(data.len());
+                    out.extend_from_slice(&decode_one(&data[off..end], channels)?);
+                    off = end;
+                }
+                Ok(out)
+            }
+            _ => decode_one(data, channels),
+        }
+    }
+
     fn decode_packet(&mut self, pkt: &Packet) -> Result<()> {
         if pkt.data.is_empty() {
             self.pending = Some(PendingFrame {
@@ -556,14 +612,25 @@ impl AdpcmDecoder {
         }
         let channels = self.channels as usize;
         let pcm = match self.variant {
-            Variant::Ms => match &self.ms_coeffs {
-                Some(coeffs) => ms::decode_block_with_coeffs(&pkt.data, channels, coeffs)?,
-                None => ms::decode_block(&pkt.data, channels)?,
-            },
-            Variant::ImaWav if self.ima_bits == 3 => {
-                ima_wav::decode_block_3bit(&pkt.data, channels)?
+            // MS / IMA-WAV are block-oriented: each block re-seeds the
+            // predictor from its own header. A producer that hands the
+            // decoder a packet spanning several blocks (a whole WAV `data`
+            // chunk, an AVI audio chunk, a large read buffer) is decoded
+            // block-by-block when `block_align` is known; otherwise the
+            // packet is taken as a single block (back-compatible — the
+            // common one-block-per-packet path is unchanged).
+            Variant::Ms => {
+                self.decode_blocked(&pkt.data, channels, |data, ch| match &self.ms_coeffs {
+                    Some(coeffs) => ms::decode_block_with_coeffs(data, ch, coeffs),
+                    None => ms::decode_block(data, ch),
+                })?
             }
-            Variant::ImaWav => ima_wav::decode_block(&pkt.data, channels)?,
+            Variant::ImaWav if self.ima_bits == 3 => {
+                self.decode_blocked(&pkt.data, channels, |data, ch| {
+                    ima_wav::decode_block_3bit(data, ch)
+                })?
+            }
+            Variant::ImaWav => self.decode_blocked(&pkt.data, channels, ima_wav::decode_block)?,
             Variant::ImaQt => {
                 // Packet may contain N·(channels·34) bytes — iterate.
                 let blk = ima_qt::QT_BLOCK_SIZE * channels;

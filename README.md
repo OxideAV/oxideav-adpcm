@@ -40,6 +40,16 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
 
 ### Notable format details
 
+- **Multi-block packets (`block_align` decode option)** — the
+  block-oriented MS and IMA-WAV (4-bit and 3-bit) decoders split a packet
+  that carries several concatenated blocks — a whole WAV `data` chunk, an
+  AVI audio chunk, a large demuxer read buffer — into its constituent
+  blocks, each re-seeding its predictor from its own header. The decoder
+  learns the WAV `nBlockAlign` (bytes per block, all channels) from the
+  `block_align` codec option; pass it through `CodecParameters::options`.
+  Without the option a packet is taken as a single block (back-compatible
+  with producers that already frame one block per packet). IMA-QT derives
+  its own fixed 34-byte block and ignores the option.
 - **MS-ADPCM custom predictor sets** — the decoder reads the
   `ADPCMWAVEFORMAT` trailer (`wSamplesPerBlock`, `wNumCoef`, variable
   `aCoeff[]`) from `CodecParameters::extradata`, so a block's

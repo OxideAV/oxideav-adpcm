@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Multi-block packet decode for MS / IMA-WAV (4-bit + 3-bit) — a packet
+  carrying several concatenated blocks (whole WAV `data` chunk, AVI audio
+  chunk, large read buffer) is now split into its constituent blocks via
+  the new `block_align` decode option (WAV `nBlockAlign`); each block
+  re-seeds its predictor from its own header. Without the option a packet
+  is decoded as a single block (back-compatible). Previously only the
+  first block of such a packet was decoded.
 - Dialogic/OKI VOX §5 reset preamble (`dialogic::reset_preamble`) — the
   spec-mandated 24-byte / 48-sample alternating ±zero-code sequence that
   resets a stream to its initial conditions (step floor, no DC offset)
