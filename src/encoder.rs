@@ -797,6 +797,22 @@ pub fn ima_encode_block_3bit(
     Ok(out)
 }
 
+/// Compute a near-256-byte default block size that satisfies the 4-bit
+/// framing constraint (header + a whole number of 4-byte groups per
+/// channel). At least one group is always included.
+///
+/// `DEFAULT_BLOCK_SIZE` (256) only satisfies `body % (4*channels) == 0`
+/// for channel counts that happen to divide 232; for others (e.g. 6ch:
+/// `256 - 24 = 232`, not a multiple of 24) it does not. This rounds the
+/// body down to a whole number of per-channel 4-byte groups so the
+/// encoder's default block is always valid for any 1..=8 channel layout.
+pub(crate) fn default_block_size_4bit(channels: usize) -> usize {
+    let header = 4 * channels;
+    let group = 4 * channels;
+    let groups = DEFAULT_BLOCK_SIZE.saturating_sub(header).max(group) / group;
+    header + groups.max(1) * group
+}
+
 /// Compute a near-256-byte default block size that satisfies the 3-bit
 /// framing constraint (header + a whole number of 12-byte groups per
 /// channel). At least one group is always included.
@@ -837,7 +853,7 @@ impl ImaWavEncoder {
             }
             4 => {
                 self.bits_per_sample = 4;
-                self.block_size = DEFAULT_BLOCK_SIZE;
+                self.block_size = default_block_size_4bit(self.channels);
             }
             other => {
                 return Err(Error::unsupported(format!(
@@ -1399,7 +1415,7 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             let mut enc = ImaWavEncoder {
                 output_params: params.clone(),
                 channels: channels as usize,
-                block_size: DEFAULT_BLOCK_SIZE,
+                block_size: default_block_size_4bit(channels as usize),
                 bits_per_sample: 4,
                 pcm: Vec::new(),
                 pending: VecDeque::new(),
@@ -1736,6 +1752,66 @@ mod tests {
         let p = CodecParameters::audio(CodecId::new("adpcm_not_a_real_id"));
         let r = make_encoder(&p);
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn default_block_size_4bit_is_valid_for_every_channel_count() {
+        // Regression: the fixed 256-byte default failed the 4-byte-group
+        // framing constraint for channel counts that don't divide
+        // (256 - 4*ch) — e.g. 6ch (232 % 24 != 0). The channel-aware
+        // default must round the body down to a whole number of per-
+        // channel 4-byte groups, so `ima_encode_block` accepts a full
+        // block of `samples_per_block * channels` samples for all 1..=8.
+        for ch in 1usize..=8 {
+            let bs = default_block_size_4bit(ch);
+            let header = 4 * ch;
+            let group = 4 * ch;
+            assert!(bs > header, "{ch}ch: block size {bs} <= header {header}");
+            assert_eq!(
+                (bs - header) % group,
+                0,
+                "{ch}ch: body {} not a multiple of group {group}",
+                bs - header
+            );
+            // A whole block of PCM must encode without error.
+            let groups = (bs - header) / group;
+            let samples_per_channel = 1 + groups * 8;
+            let pcm = vec![0i16; samples_per_channel * ch];
+            assert!(
+                ima_encode_block(&pcm, ch, bs).is_ok(),
+                "{ch}ch: default block size {bs} rejected by ima_encode_block"
+            );
+        }
+        // Mono / stereo defaults stay at the historical 256 bytes so the
+        // existing fixtures and bounds are unchanged.
+        assert_eq!(default_block_size_4bit(1), 256);
+        assert_eq!(default_block_size_4bit(2), 256);
+    }
+
+    #[test]
+    fn ima_wav_factory_builds_and_encodes_six_channels() {
+        // The factory accepts up to 8 channels; build a 6ch (5.1) encoder
+        // and confirm a full frame drains to at least one packet — the
+        // path that previously errored at flush for 6 channels.
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_IMA_WAV));
+        p.sample_rate = Some(22_050);
+        p.channels = Some(6);
+        let mut enc = make_encoder(&p).expect("IMA-WAV 6ch encoder factory");
+        let total = 600usize;
+        let pcm: Vec<i16> = (0..total * 6).map(|i| (i % 4000) as i16 - 2000).collect();
+        let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let af = Frame::Audio(AudioFrame {
+            samples: total as u32,
+            pts: Some(0),
+            data: vec![bytes],
+        });
+        enc.send_frame(&af).unwrap();
+        enc.flush().unwrap();
+        let mut packets = 0;
+        while enc.receive_packet().is_ok() {
+            packets += 1;
+        }
+        assert!(packets >= 1, "6ch IMA-WAV encoder produced no packets");
     }
 
     #[test]

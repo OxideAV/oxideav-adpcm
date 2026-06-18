@@ -39,25 +39,37 @@ fn rms_error(a: &[i16], b: &[i16]) -> f64 {
     (sse / n as f64).sqrt()
 }
 
+/// Build interleaved PCM for `channels` channels: channel `c` carries a
+/// sine at a distinct frequency so the round trip can verify each lane
+/// landed on the right output slot (a channel-interleave regression would
+/// scramble the per-lane spectra and blow the per-lane RMS bound).
+fn multi_channel_pcm(channels: usize, total_samples: usize, sample_rate: f64) -> Vec<i16> {
+    // A spread of audibly-distinct tones, one per channel (mono uses the
+    // first). The amplitude is backed off as the channel count grows is
+    // unnecessary — each lane is independent — so a fixed amp keeps the
+    // per-lane bound comparable across layouts.
+    const FREQS: [f64; 8] = [220.0, 330.0, 440.0, 550.0, 660.0, 770.0, 880.0, 990.0];
+    let amp = if channels == 1 { 12000.0 } else { 8000.0 };
+    let lanes: Vec<Vec<i16>> = (0..channels)
+        .map(|c| sine_pcm(total_samples, FREQS[c % FREQS.len()], sample_rate, amp))
+        .collect();
+    let mut v = Vec::with_capacity(total_samples * channels);
+    for i in 0..total_samples {
+        for lane in &lanes {
+            v.push(lane[i]);
+        }
+    }
+    v
+}
+
 fn round_trip(
     codec_id: &str,
     channels: u16,
     total_samples: usize,
     sample_rate: u32,
 ) -> (Vec<i16>, Vec<i16>) {
-    // Build PCM.
-    let pcm: Vec<i16> = if channels == 1 {
-        sine_pcm(total_samples, 440.0, sample_rate as f64, 12000.0)
-    } else {
-        let l = sine_pcm(total_samples, 440.0, sample_rate as f64, 8000.0);
-        let r = sine_pcm(total_samples, 660.0, sample_rate as f64, 8000.0);
-        let mut v = Vec::with_capacity(total_samples * 2);
-        for i in 0..total_samples {
-            v.push(l[i]);
-            v.push(r[i]);
-        }
-        v
-    };
+    // Build PCM — one distinct tone per channel.
+    let pcm: Vec<i16> = multi_channel_pcm(channels as usize, total_samples, sample_rate as f64);
     let pcm_bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
 
     let mut reg = CodecRegistry::new();
@@ -135,6 +147,89 @@ fn ima_wav_stereo_round_trip_via_registry() {
     assert!(decoded.len() >= pcm.len());
     let rms = rms_error(&decoded, &pcm);
     assert!(rms < 250.0, "IMA-WAV stereo registry round-trip RMS {rms}");
+}
+
+/// Per-lane RMS error: de-interleave `channels` lanes from both buffers
+/// and return the worst lane's RMS. A channel-interleave bug scrambles
+/// the lanes, so a per-lane bound catches what a global RMS would mask.
+fn worst_lane_rms(pcm: &[i16], decoded: &[i16], channels: usize) -> f64 {
+    let frames = (pcm.len().min(decoded.len())) / channels;
+    let mut worst = 0f64;
+    for c in 0..channels {
+        let mut sse = 0f64;
+        for f in 0..frames {
+            let d = pcm[f * channels + c] as f64 - decoded[f * channels + c] as f64;
+            sse += d * d;
+        }
+        let rms = (sse / frames.max(1) as f64).sqrt();
+        if rms > worst {
+            worst = rms;
+        }
+    }
+    worst
+}
+
+#[test]
+fn ima_wav_four_channel_round_trip_via_registry() {
+    // 4.0 layout: four independent 4-byte-group-per-channel IMA-WAV
+    // blocks per packet. Each lane carries a distinct tone, so a
+    // per-lane RMS bound pins both the channel-interleave indexing and
+    // the per-channel predictor/step isolation. The 4-bit IMA-WAV path
+    // supports 1..=8 channels in the decoder, the `ima_encode_block`
+    // function and the factory; this is the first end-to-end exercise
+    // above stereo.
+    let (pcm, decoded) = round_trip(CODEC_ID_IMA_WAV, 4, 2000, 22050);
+    assert!(decoded.len() >= pcm.len());
+    let rms = worst_lane_rms(&pcm, &decoded, 4);
+    assert!(rms < 250.0, "IMA-WAV 4ch worst-lane round-trip RMS {rms}");
+}
+
+#[test]
+fn ima_wav_six_channel_round_trip_via_registry() {
+    // 5.1 layout (six channels). Same per-lane guarantee as the 4.0
+    // case, one step further up the channel count.
+    let (pcm, decoded) = round_trip(CODEC_ID_IMA_WAV, 6, 2000, 22050);
+    assert!(decoded.len() >= pcm.len());
+    let rms = worst_lane_rms(&pcm, &decoded, 6);
+    assert!(rms < 250.0, "IMA-WAV 6ch worst-lane round-trip RMS {rms}");
+}
+
+#[test]
+fn ima_wav_block_api_lane_assignment_six_channels() {
+    // Direct block-API check, independent of the trait/factory path: feed
+    // six lanes whose per-lane DC level is distinct and confirm each lane
+    // decodes back to its own level. A bug in the `4*ch` group indexing or
+    // the `sample_idx * channels + ch` output placement would cross lanes.
+    use oxideav_adpcm::encoder::ima_encode_block;
+    use oxideav_adpcm::ima_wav::decode_block;
+
+    let channels = 6usize;
+    // One 4-byte group per channel → 1 + 8 = 9 samples per channel.
+    let block_size = 4 * channels + 4 * channels; // header + one group/ch
+    let samples_per_channel = 9usize;
+    // Lane c is a flat level c*2000 (well inside i16, distinct per lane).
+    let mut pcm = vec![0i16; samples_per_channel * channels];
+    for f in 0..samples_per_channel {
+        for c in 0..channels {
+            pcm[f * channels + c] = (c as i16) * 2000;
+        }
+    }
+    let block = ima_encode_block(&pcm, channels, block_size).unwrap();
+    let decoded = decode_block(&block, channels).unwrap();
+    assert_eq!(decoded.len(), samples_per_channel * channels);
+    // Sample 0 of each lane is the header predictor seed = that lane's
+    // level exactly; later samples track it within a small ADPCM wobble.
+    for c in 0..channels {
+        let want = (c as i32) * 2000;
+        assert_eq!(decoded[c] as i32, want, "lane {c} seed sample");
+        for f in 0..samples_per_channel {
+            let got = decoded[f * channels + c] as i32;
+            assert!(
+                (got - want).abs() < 512,
+                "lane {c} sample {f}: got {got}, want near {want}"
+            );
+        }
+    }
 }
 
 #[test]

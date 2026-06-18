@@ -58,6 +58,16 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   per-channel blocks in the packet, with no new framing. `Variant::ImaQt`
   now reports `max_channels() == Some(8)` (was 2);
   `ima_qt::QT_MAX_CHANNELS` is exposed as the cap.
+- **IMA-WAV 4-bit multichannel encode** — the 4-bit IMA-WAV decoder,
+  `ima_encode_block` and the encoder factory all support 1..=8 channels
+  (the body interleaves channels in 4-byte groups). The frame-based
+  encoder now sizes its default block per channel count so the
+  4-byte-group framing always holds — the previous fixed 256-byte default
+  errored at `flush` for layouts where `256 - 4·channels` wasn't a
+  multiple of `4·channels` (e.g. 5.1). Mono/stereo defaults are unchanged
+  (still 256 bytes). Multichannel (4.0 / 5.1) encode→decode round-trips
+  are pinned with per-lane RMS bounds plus a direct block-API lane
+  assignment check.
 - **MS-ADPCM custom predictor sets** — the decoder reads the
   `ADPCMWAVEFORMAT` trailer (`wSamplesPerBlock`, `wNumCoef`, variable
   `aCoeff[]`) from `CodecParameters::extradata`, so a block's

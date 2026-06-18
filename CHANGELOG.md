@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- IMA-WAV (`adpcm_ima_wav`, tag `0x0011`) 4-bit multichannel encode fix +
+  end-to-end coverage — the 4-bit encoder's default block size was a fixed
+  256 bytes, which only satisfies the 4-byte-group-per-channel framing
+  constraint for channel counts that divide `256 - 4*channels`. For
+  layouts like 5.1 (6ch: `256 - 24 = 232`, not a multiple of 24) the
+  encoder errored at the first `flush`. The default block size is now
+  channel-aware (`default_block_size_4bit`, rounding the body down to a
+  whole number of per-channel groups), so the 1..=8 channel range the
+  decoder and `ima_encode_block` already supported is reachable through
+  the trait/factory path. Mono/stereo defaults stay at 256 bytes
+  (unchanged fixtures/bounds). New tests: 4.0 + 5.1 registry round-trips
+  with per-lane RMS bounds, a direct block-API six-lane assignment check,
+  a factory 6ch send/flush drain, and an invariant test pinning the
+  default block size valid for every channel count.
 - IMA-QT (`adpcm_ima_qt`, QuickTime `ima4`) multichannel block interleave
   — the decoder, encoder and factory now accept 1..=8 channels (mono /
   stereo / 4.0 / 5.1 / 7.1) instead of the previous mono/stereo cap. The
