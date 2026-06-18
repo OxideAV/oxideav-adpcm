@@ -547,7 +547,13 @@ mod tests {
         // Over-cap channels: None.
         assert_eq!(Variant::Ms.samples_per_block(3, 21), None);
         assert_eq!(Variant::ImaWav.samples_per_block(9, 36), None);
-        assert_eq!(Variant::ImaQt.samples_per_block(3, 102), None);
+        // ImaQt now accepts up to QT_MAX_CHANNELS (8); one above is None.
+        assert_eq!(Variant::ImaQt.samples_per_block(9, 34 * 9), None);
+        // …and a mid-range multichannel count (6 = 5.1) is accepted.
+        assert_eq!(
+            Variant::ImaQt.samples_per_block(6, 34 * 6),
+            Some(crate::ima_qt::QT_SAMPLES_PER_BLOCK)
+        );
         // Block shorter than the per-channel header: None.
         assert_eq!(Variant::Ms.samples_per_block(1, 6), None);
         assert_eq!(Variant::ImaWav.samples_per_block(1, 3), None);
@@ -654,7 +660,13 @@ mod tests {
         // Over-cap channels: None.
         assert_eq!(Variant::Ms.block_size_bytes(3, 2), None);
         assert_eq!(Variant::ImaWav.block_size_bytes(9, 1), None);
-        assert_eq!(Variant::ImaQt.block_size_bytes(3, 64), None);
+        // ImaQt now accepts up to QT_MAX_CHANNELS (8); one above is None.
+        assert_eq!(Variant::ImaQt.block_size_bytes(9, 64), None);
+        // …and a mid-range multichannel count (6 = 5.1) inverts cleanly.
+        assert_eq!(
+            Variant::ImaQt.block_size_bytes(6, crate::ima_qt::QT_SAMPLES_PER_BLOCK),
+            Some(34 * 6)
+        );
         // Below header-only minimum: None.
         assert_eq!(Variant::Ms.block_size_bytes(1, 1), None);
         assert_eq!(Variant::ImaWav.block_size_bytes(1, 0), None);

@@ -278,12 +278,20 @@ fn ima_qt_truncated_prefixes_never_panic() {
     }
 }
 
-/// QT-IMA: invalid channel counts rejected without panic.
+/// QT-IMA: out-of-range channel counts rejected without panic.
+/// The block-interleave layout accepts 1..=QT_MAX_CHANNELS (8); zero and
+/// anything above the ceiling are errors.
 #[test]
 fn ima_qt_invalid_channel_count_is_rejected() {
-    for ch in [0usize, 3, 8] {
-        let block = vec![0u8; 34 * 3];
+    for ch in [0usize, 9, 16, 255] {
+        let block = vec![0u8; 34 * ch.max(1)];
         assert!(ima_qt::decode_block(&block, ch).is_err());
+    }
+    // In-range multichannel counts are accepted (with a correctly-sized
+    // block) and decode without panic.
+    for ch in [1usize, 2, 6, 8] {
+        let block = vec![0u8; 34 * ch];
+        assert!(ima_qt::decode_block(&block, ch).is_ok());
     }
 }
 

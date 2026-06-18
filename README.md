@@ -10,7 +10,7 @@ QuickTime / VOX / FM-synth streams.
 |-------------------|-------------------------------|-----------------------------|
 | `adpcm_ms`        | Microsoft ADPCM               | WAV tag `0x0002` / AVI      |
 | `adpcm_ima_wav`   | IMA / DVI ADPCM — WAV variant (4-bit **and** 3-bit) | WAV tag `0x0011` |
-| `adpcm_ima_qt`    | IMA ADPCM — QuickTime variant | QuickTime / MOV (fourcc `ima4`) |
+| `adpcm_ima_qt`    | IMA ADPCM — QuickTime variant (mono…7.1, block-interleaved) | QuickTime / MOV (fourcc `ima4`) |
 | `adpcm_yamaha`    | Yamaha ADPCM-B / DELTA-T (Y8950/YM2608-B/YMZ280B/AICA) | WAV tag `0x0020` |
 | `adpcm_yamaha_a`  | Yamaha ADPCM-A (YM2608/YM2610 rhythm channels) | chip-internal; no WAV tag |
 | `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless) **and** WAV tag `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) |
@@ -50,6 +50,14 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   Without the option a packet is taken as a single block (back-compatible
   with producers that already frame one block per packet). IMA-QT derives
   its own fixed 34-byte block and ignores the option.
+- **IMA-QT multichannel block interleave** — the QuickTime `ima4` layout
+  is one independent 34-byte block per channel, round-robin, each with its
+  own preamble and predictor/step state. The decoder and encoder accept
+  1..=8 channels (mono / stereo / 4.0 / 5.1 / 7.1) — the layout has no
+  intrinsic channel ceiling, so the extra channels are simply more
+  per-channel blocks in the packet, with no new framing. `Variant::ImaQt`
+  now reports `max_channels() == Some(8)` (was 2);
+  `ima_qt::QT_MAX_CHANNELS` is exposed as the cap.
 - **MS-ADPCM custom predictor sets** — the decoder reads the
   `ADPCMWAVEFORMAT` trailer (`wSamplesPerBlock`, `wNumCoef`, variable
   `aCoeff[]`) from `CodecParameters::extradata`, so a block's

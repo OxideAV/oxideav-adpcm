@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- IMA-QT (`adpcm_ima_qt`, QuickTime `ima4`) multichannel block interleave
+  — the decoder, encoder and factory now accept 1..=8 channels (mono /
+  stereo / 4.0 / 5.1 / 7.1) instead of the previous mono/stereo cap. The
+  QuickTime layout is one independent 34-byte block per channel,
+  round-robin, each with its own preamble + predictor/step state, so the
+  extra channels require no new framing — only the channel-count guards
+  were lifted. `Variant::ImaQt::max_channels()` now reports `Some(8)`
+  (was 2); `ima_qt::QT_MAX_CHANNELS` exposes the cap. New tests cover a
+  6-channel decode lane-assignment check and a 6-channel encode→decode
+  round-trip (per-lane RMS bounded).
 - IMA-QT (`adpcm_ima_qt`, QuickTime `ima4`) end-to-end validator
   coverage — a new integration test decodes a CAF-carried `ima4` sine
   (raw blocks pulled from the CAF `data` chunk) and cross-correlates the

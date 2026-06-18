@@ -199,8 +199,11 @@ impl Variant {
     /// - `Variant::ImaWav` → `Some(8)` — IMA-WAV uses 4-byte-group
     ///   per-channel interleave; eight matches the WAVEFORMATEX 8-channel
     ///   speaker assignment ceiling the registry layer enforces.
-    /// - `Variant::ImaQt` → `Some(2)` — QuickTime `ima4` sample entries
-    ///   carry mono or stereo blocks (block-level interleave).
+    /// - `Variant::ImaQt` → `Some(8)` — QuickTime `ima4` carries one
+    ///   independent 34-byte block per channel, round-robin (block-level
+    ///   interleave). The layout has no intrinsic channel ceiling, so this
+    ///   matches the multichannel surround layouts (mono / stereo / 4.0 /
+    ///   5.1 / 7.1), capped at [`ima_qt::QT_MAX_CHANNELS`].
     /// - `Variant::Yamaha` → `None` — DELTA-T is a continuous nibble
     ///   stream with sample-level channel round-robin; the decoder
     ///   factory accepts any positive count.
@@ -214,7 +217,7 @@ impl Variant {
         match self {
             Variant::Ms => Some(2),
             Variant::ImaWav => Some(8),
-            Variant::ImaQt => Some(2),
+            Variant::ImaQt => Some(ima_qt::QT_MAX_CHANNELS as u16),
             Variant::Yamaha => None,
             Variant::YamahaA => Some(1),
             Variant::Dialogic => Some(2),
@@ -437,11 +440,19 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         return Err(Error::unsupported("adpcm: channel count must be >= 1"));
     }
     match variant {
-        Variant::Ms | Variant::ImaQt => {
+        Variant::Ms => {
             if channels > 2 {
                 return Err(Error::unsupported(format!(
                     "adpcm: {:?} variant supports 1 or 2 channels, got {channels}",
                     variant
+                )));
+            }
+        }
+        Variant::ImaQt => {
+            if channels as usize > ima_qt::QT_MAX_CHANNELS {
+                return Err(Error::unsupported(format!(
+                    "adpcm_ima_qt: supports up to {} channels, got {channels}",
+                    ima_qt::QT_MAX_CHANNELS
                 )));
             }
         }

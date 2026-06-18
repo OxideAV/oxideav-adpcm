@@ -12,10 +12,14 @@
 //!   nibble is decoded first**, then the top nibble. 32 bytes × 2 nibbles
 //!   = 64 samples per block per channel.
 //!
-//! Stereo files use **block-level** interleaving: the first 34-byte block
-//! is channel 0, the next 34-byte block is channel 1, and so on. Decoding
-//! a packet of `channels * 34` bytes therefore produces 64 samples per
-//! channel, interleaved on output.
+//! Multi-channel files use **block-level** interleaving: the first 34-byte
+//! block is channel 0, the next 34-byte block is channel 1, and so on,
+//! round-robin across `channels`. Each channel's block carries its own
+//! preamble and is decoded with its own independent predictor / step
+//! state. Decoding a packet of `channels * 34` bytes therefore produces
+//! 64 samples per channel, sample-interleaved on output. Stereo (2ch) is
+//! the common case; the same per-channel-block layout generalises with no
+//! extra framing to 4.0 / 5.1 / 7.1 QuickTime audio.
 
 use crate::ima_wav::ima_expand_nibble;
 use oxideav_core::{Error, Result};
@@ -26,14 +30,20 @@ pub const QT_BLOCK_SIZE: usize = 34;
 /// Samples per block per channel (32 body bytes × 2 nibbles).
 pub const QT_SAMPLES_PER_BLOCK: usize = 64;
 
+/// Maximum channel count accepted by the QuickTime `ima4` block-interleave
+/// path. Each channel is an independent 34-byte block; the layout imposes
+/// no intrinsic ceiling, so this matches the practical multichannel
+/// surround layouts (mono / stereo / 4.0 / 5.1 / 7.1).
+pub const QT_MAX_CHANNELS: usize = 8;
+
 /// Decode `channels` contiguous 34-byte QT-IMA blocks into interleaved i16.
 ///
 /// Returns `64 * channels` i16 samples (one packet of QT-IMA = 64 samples
-/// per channel, block-level-interleaved for stereo).
+/// per channel, block-level-interleaved across the channels).
 pub fn decode_block(data: &[u8], channels: usize) -> Result<Vec<i16>> {
-    if channels == 0 || channels > 2 {
+    if channels == 0 || channels > QT_MAX_CHANNELS {
         return Err(Error::unsupported(format!(
-            "adpcm_ima_qt: channel count {channels} not supported (1 or 2)"
+            "adpcm_ima_qt: channel count {channels} not supported (1..={QT_MAX_CHANNELS})"
         )));
     }
     let needed = QT_BLOCK_SIZE * channels;
@@ -97,6 +107,45 @@ mod tests {
     fn rejects_short_input() {
         assert!(decode_block(&[0u8; 33], 1).is_err());
         assert!(decode_block(&[0u8; 34], 2).is_err());
+    }
+
+    #[test]
+    fn rejects_too_many_channels() {
+        // 9 channels exceeds the QT_MAX_CHANNELS ceiling.
+        let data = vec![0u8; QT_BLOCK_SIZE * 9];
+        assert!(decode_block(&data, 9).is_err());
+        assert!(decode_block(&[], 0).is_err());
+    }
+
+    #[test]
+    fn six_channel_block_interleave() {
+        // 5.1 layout: six independent 34-byte blocks, each seeded with a
+        // distinct predictor so we can confirm the per-channel decode
+        // lands on the right interleaved output lane.
+        let channels = 6usize;
+        let mut data = vec![0u8; QT_BLOCK_SIZE * channels];
+        // Seed each channel's preamble with predictor = ch * 256 (top 9
+        // bits), step_index 0. Body stays zero so the predictor barely
+        // moves from its seed.
+        for ch in 0..channels {
+            let predictor = (ch as i16) * 256;
+            let preamble = (predictor as u16) & 0xFF80; // step_index = 0
+            let off = ch * QT_BLOCK_SIZE;
+            data[off] = (preamble >> 8) as u8;
+            data[off + 1] = (preamble & 0xFF) as u8;
+        }
+        let pcm = decode_block(&data, channels).unwrap();
+        assert_eq!(pcm.len(), QT_SAMPLES_PER_BLOCK * channels);
+        // First interleaved frame is each channel's first decoded sample,
+        // which is close to its seed predictor (zero body nibbles).
+        for ch in 0..channels {
+            let expected = (ch as i32) * 256;
+            let got = pcm[ch] as i32;
+            assert!(
+                (got - expected).abs() < 64,
+                "ch {ch}: got {got}, expected near {expected}"
+            );
+        }
     }
 
     #[test]

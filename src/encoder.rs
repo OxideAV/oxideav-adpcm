@@ -963,9 +963,10 @@ pub const QT_SAMPLES_PER_BLOCK: usize = 64;
 /// 64 LSB. This is inherent to the QT block format and not a property of the
 /// search loop.
 pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> {
-    if !(1..=2).contains(&channels) {
+    if channels == 0 || channels > crate::ima_qt::QT_MAX_CHANNELS {
         return Err(Error::unsupported(format!(
-            "adpcm_ima_qt encoder: channel count {channels} not supported (1 or 2)"
+            "adpcm_ima_qt encoder: channel count {channels} not supported (1..={})",
+            crate::ima_qt::QT_MAX_CHANNELS
         )));
     }
     let expected = QT_SAMPLES_PER_BLOCK * channels;
@@ -1418,9 +1419,10 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             Ok(Box::new(enc))
         }
         crate::CODEC_ID_IMA_QT => {
-            if channels > 2 {
+            if channels as usize > crate::ima_qt::QT_MAX_CHANNELS {
                 return Err(Error::unsupported(format!(
-                    "adpcm_ima_qt encoder: channels {channels} > 2 not supported"
+                    "adpcm_ima_qt encoder: channels {channels} > {} not supported",
+                    crate::ima_qt::QT_MAX_CHANNELS
                 )));
             }
             Ok(Box::new(ImaQtEncoder {
@@ -1847,9 +1849,58 @@ mod tests {
 
     #[test]
     fn ima_qt_encode_rejects_unsupported_channel_count() {
-        let pcm = vec![0i16; QT_SAMPLES_PER_BLOCK * 3];
-        assert!(ima_qt_encode_block(&pcm, 3).is_err());
+        // Above the QT_MAX_CHANNELS ceiling.
+        let over = crate::ima_qt::QT_MAX_CHANNELS + 1;
+        let pcm = vec![0i16; QT_SAMPLES_PER_BLOCK * over];
+        assert!(ima_qt_encode_block(&pcm, over).is_err());
         assert!(ima_qt_encode_block(&[], 0).is_err());
+    }
+
+    #[test]
+    fn ima_qt_six_channel_round_trip_low_error() {
+        // 5.1-style multichannel: six independent per-channel blocks,
+        // each carrying its own preamble + body, block-level interleaved.
+        let channels = 6usize;
+        let n_blocks = 4;
+        let n = QT_SAMPLES_PER_BLOCK * n_blocks;
+        // Distinct tone per channel so a lane mix-up would show up.
+        let tones: Vec<Vec<i16>> = (0..channels)
+            .map(|ch| sine_pcm(n, 220.0 * (ch as f64 + 1.0), 22050.0, 8000.0))
+            .collect();
+        let mut pcm = Vec::with_capacity(n * channels);
+        for i in 0..n {
+            for ch in 0..channels {
+                pcm.push(tones[ch][i]);
+            }
+        }
+        let mut decoded: Vec<Vec<i16>> = vec![Vec::new(); channels];
+        let per_block_interleaved = QT_SAMPLES_PER_BLOCK * channels;
+        for chunk in pcm.chunks(per_block_interleaved) {
+            let blk = ima_qt_encode_block(chunk, channels).unwrap();
+            assert_eq!(blk.len(), QT_BLOCK_BYTES_PER_CHANNEL * channels);
+            let d = crate::ima_qt::decode_block(&blk, channels).unwrap();
+            assert_eq!(d.len(), per_block_interleaved);
+            for i in 0..QT_SAMPLES_PER_BLOCK {
+                for ch in 0..channels {
+                    decoded[ch].push(d[i * channels + ch]);
+                }
+            }
+        }
+        for ch in 0..channels {
+            let rms = rms_error(&decoded[ch], &tones[ch]);
+            assert!(rms < 1500.0, "IMA-QT 6ch lane {ch} RMS {rms}");
+        }
+    }
+
+    #[test]
+    fn ima_qt_factory_builds_six_channels() {
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_IMA_QT));
+        p.sample_rate = Some(22050);
+        p.channels = Some(6);
+        let _enc = make_encoder(&p).expect("IMA-QT 6ch encoder factory");
+        // One above the ceiling must be rejected.
+        p.channels = Some((crate::ima_qt::QT_MAX_CHANNELS + 1) as u16);
+        assert!(make_encoder(&p).is_err());
     }
 
     #[test]
