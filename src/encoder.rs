@@ -1173,6 +1173,10 @@ impl Encoder for ImaQtEncoder {
 pub struct DialogicEncoder {
     output_params: CodecParameters,
     state: dialogic::Channel,
+    /// Nibble pack order from the `nibble_order` codec option: `HiFirst`
+    /// (default; Dialogic VOX / MSM6295) or `LoFirst` (MSM6258). The
+    /// decoder reads with the matching order.
+    order: dialogic::NibbleOrder,
     pending: VecDeque<Packet>,
     samples_emitted: i64,
 }
@@ -1200,8 +1204,7 @@ impl Encoder for DialogicEncoder {
             return Ok(());
         }
         let n_samples = pcm.len() as i64;
-        let bytes =
-            dialogic::encode_packet_wide16(&pcm, &mut self.state, dialogic::NibbleOrder::HiFirst);
+        let bytes = dialogic::encode_packet_wide16(&pcm, &mut self.state, self.order);
         let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
         let pts = self.samples_emitted;
         self.samples_emitted += n_samples;
@@ -1456,10 +1459,15 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                     "adpcm_yamaha encoder: channels {channels} > 8 not supported"
                 )));
             }
+            // `chip` codec option selects the AICA (default) or OPNA
+            // step-adaptation constants; the encoder seeds its analysis
+            // state with the matching chip so the bytes it emits decode
+            // bit-exactly under the same `chip` option.
+            let chip = crate::decoder::parse_yamaha_chip_option(crate::Variant::Yamaha, params)?;
             Ok(Box::new(YamahaEncoder {
                 output_params: params.clone(),
                 channels: channels as usize,
-                state: vec![yamaha::Channel::default(); channels as usize],
+                state: vec![yamaha::Channel::for_chip(chip); channels as usize],
                 pending: VecDeque::new(),
                 samples_emitted: 0,
             }))
@@ -1483,9 +1491,15 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                     "adpcm_dialogic encoder: only mono supported on the registry path, got {channels}"
                 )));
             }
+            // `nibble_order` codec option selects HiFirst (default;
+            // Dialogic VOX / MSM6295) or LoFirst (MSM6258); the encoder
+            // packs in that order so the matching decoder reads it back.
+            let order =
+                crate::decoder::parse_dialogic_order_option(crate::Variant::Dialogic, params)?;
             Ok(Box::new(DialogicEncoder {
                 output_params: params.clone(),
                 state: dialogic::Channel::default(),
+                order,
                 pending: VecDeque::new(),
                 samples_emitted: 0,
             }))

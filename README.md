@@ -87,7 +87,21 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   constants: `Chip::Aica` (default, the WAV-tag-`0x0020` convention,
   also Y8950 / YMZ280B) vs `Chip::Opna` (YM2608 OPNA Table 5-1). The two
   tables live in `tables::YAMAHA_INDEX_SCALE` /
-  `tables::YAMAHA_INDEX_SCALE_OPNA`.
+  `tables::YAMAHA_INDEX_SCALE_OPNA`. The registry decoder **and** encoder
+  honour a `chip` codec option (`"aica"` default / `"opna"`) passed
+  through `CodecParameters::options`, so a YM2608/OPNA stream resolves to
+  the correct step constants without dropping to the block-level API; the
+  encoder seeds its analysis state with the same chip so its bytes decode
+  bit-exactly under the matching option. A `chip` option on any other
+  variant is rejected.
+- **OKI / Dialogic nibble order** — the registry decoder and encoder
+  honour a `nibble_order` codec option (`"hi"` default — Dialogic VOX /
+  MSM6295, high nibble = first sample — vs `"lo"` — MSM6258, low nibble =
+  first sample) passed through `CodecParameters::options`. The arithmetic
+  is identical between the two chips; only the in-byte unpack order
+  differs, so an MSM6258 stream is now reachable through the registry
+  rather than only the explicit `dialogic::decode_packet(.., LoFirst, ..)`
+  entry point. A `nibble_order` option on any other variant is rejected.
 
 ### Typed variant accessor
 

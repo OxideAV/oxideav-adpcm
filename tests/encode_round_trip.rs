@@ -68,6 +68,16 @@ fn round_trip(
     total_samples: usize,
     sample_rate: u32,
 ) -> (Vec<i16>, Vec<i16>) {
+    round_trip_opts(codec_id, channels, total_samples, sample_rate, &[])
+}
+
+fn round_trip_opts(
+    codec_id: &str,
+    channels: u16,
+    total_samples: usize,
+    sample_rate: u32,
+    options: &[(&str, &str)],
+) -> (Vec<i16>, Vec<i16>) {
     // Build PCM — one distinct tone per channel.
     let pcm: Vec<i16> = multi_channel_pcm(channels as usize, total_samples, sample_rate as f64);
     let pcm_bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -78,6 +88,9 @@ fn round_trip(
     let mut params = CodecParameters::audio(CodecId::new(codec_id));
     params.sample_rate = Some(sample_rate);
     params.channels = Some(channels);
+    for (k, v) in options {
+        params.options.insert(*k, *v);
+    }
 
     let mut enc = reg.first_encoder(&params).expect("encoder factory");
     let af = AudioFrame {
@@ -306,5 +319,86 @@ fn dialogic_mono_round_trip_via_registry() {
     assert!(
         rms < 6000.0,
         "Dialogic VOX mono registry round-trip RMS {rms}"
+    );
+}
+
+#[test]
+fn yamaha_opna_chip_round_trip_via_registry() {
+    // `chip=opna` selects the YM2608 (OPNA) Application Manual Table 5-1
+    // step constants (×64 numerators, `>> 6`) rather than the AICA default
+    // (×256, `>> 8`). The encoder seeds its analysis state with the same
+    // chip, so its bytes decode bit-exactly under the same option. The
+    // round-trip must reconstruct the source within the same bound as the
+    // default AICA path — the two chips track the same `~1.1^M` curve.
+    let (pcm, decoded) = round_trip_opts(CODEC_ID_YAMAHA, 1, 800, 8000, &[("chip", "opna")]);
+    assert_eq!(decoded.len(), pcm.len());
+    let rms = rms_error(&decoded, &pcm);
+    assert!(rms < 3000.0, "Yamaha OPNA chip round-trip RMS {rms}");
+}
+
+#[test]
+fn yamaha_opna_and_aica_diverge_on_a_long_stream() {
+    // The two chips round the step-adaptation curve differently, so a
+    // stream encoded under one chip must NOT decode identically under the
+    // other once the step has accumulated enough updates. This pins that
+    // the `chip` option actually reaches the decode recurrence (a no-op
+    // wiring bug would make the two outputs match).
+    let (_pcm, aica) = round_trip_opts(CODEC_ID_YAMAHA, 1, 800, 8000, &[("chip", "aica")]);
+    // Re-encode the SAME PCM under OPNA and decode under OPNA.
+    let (_pcm2, opna) = round_trip_opts(CODEC_ID_YAMAHA, 1, 800, 8000, &[("chip", "opna")]);
+    assert_eq!(aica.len(), opna.len());
+    let differing = aica.iter().zip(&opna).filter(|(a, b)| a != b).count();
+    assert!(
+        differing > 0,
+        "AICA and OPNA decode paths produced identical output — chip option not wired"
+    );
+}
+
+#[test]
+fn dialogic_lofirst_round_trip_via_registry() {
+    // `nibble_order=lo` selects the MSM6258 low-nibble-first unpack. The
+    // encoder packs in that order and the decoder reads it back, so the
+    // round-trip reconstructs the source within the same bound as the
+    // default HiFirst (Dialogic VOX / MSM6295) path.
+    let (pcm, decoded) =
+        round_trip_opts(CODEC_ID_DIALOGIC, 1, 800, 8000, &[("nibble_order", "lo")]);
+    assert_eq!(decoded.len(), pcm.len());
+    let rms = rms_error(&decoded, &pcm);
+    assert!(rms < 6000.0, "Dialogic LoFirst round-trip RMS {rms}");
+}
+
+#[test]
+fn unknown_chip_and_order_options_are_rejected() {
+    let mut reg = CodecRegistry::new();
+    register_codecs(&mut reg);
+
+    // Bad chip value on the right codec.
+    let mut p = CodecParameters::audio(CodecId::new(CODEC_ID_YAMAHA));
+    p.channels = Some(1);
+    p.options.insert("chip", "ym9999");
+    assert!(reg.first_decoder(&p).is_err(), "bad chip value accepted");
+    assert!(
+        reg.first_encoder(&p).is_err(),
+        "bad chip value accepted (enc)"
+    );
+
+    // `chip` on a variant that has no chip selection.
+    let mut p2 = CodecParameters::audio(CodecId::new(CODEC_ID_MS));
+    p2.channels = Some(1);
+    p2.options.insert("chip", "opna");
+    assert!(reg.first_decoder(&p2).is_err(), "chip on MS accepted");
+
+    // Bad nibble_order value, and nibble_order on a non-Dialogic variant.
+    let mut p3 = CodecParameters::audio(CodecId::new(CODEC_ID_DIALOGIC));
+    p3.channels = Some(1);
+    p3.options.insert("nibble_order", "middle");
+    assert!(reg.first_decoder(&p3).is_err(), "bad nibble_order accepted");
+
+    let mut p4 = CodecParameters::audio(CodecId::new(CODEC_ID_YAMAHA));
+    p4.channels = Some(1);
+    p4.options.insert("nibble_order", "lo");
+    assert!(
+        reg.first_decoder(&p4).is_err(),
+        "nibble_order on Yamaha accepted"
     );
 }

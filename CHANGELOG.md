@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Registry `chip` codec option for Yamaha ADPCM-B (`adpcm_yamaha`) and
+  `nibble_order` codec option for OKI / Dialogic (`adpcm_dialogic`). The
+  `yamaha::Chip` (AICA default / OPNA) and `dialogic::NibbleOrder`
+  (HiFirst default / LoFirst — MSM6258) selections were previously only
+  reachable through the block-level APIs; they are now wired through
+  `CodecParameters::options` on both the decoder and encoder factories so
+  a YM2608/OPNA stream or an MSM6258 low-nibble-first stream resolves
+  correctly via the registry. The encoders seed their analysis state with
+  the matching chip/order so emitted bytes decode bit-exactly under the
+  same option. Unknown values, and either option on a variant that has no
+  such selection, are rejected. New `encode_round_trip` tests: OPNA
+  round-trip, AICA-vs-OPNA divergence proof, LoFirst round-trip, and an
+  option-rejection matrix.
 - IMA-WAV (`adpcm_ima_wav`, tag `0x0011`) 4-bit multichannel encode fix +
   end-to-end coverage — the 4-bit encoder's default block size was a fixed
   256 bytes, which only satisfies the 4-byte-group-per-channel framing

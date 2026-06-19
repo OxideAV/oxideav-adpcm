@@ -428,6 +428,63 @@ impl Variant {
     }
 }
 
+/// Parse the `chip` codec option into a [`yamaha::Chip`].
+///
+/// Accepted only for [`Variant::Yamaha`] (ADPCM-B / DELTA-T): `"aica"`
+/// (default) or `"opna"`. Absent ⇒ `Chip::Aica`. For any other variant a
+/// present `chip` option is rejected (the option is meaningless there).
+pub(crate) fn parse_yamaha_chip_option(
+    variant: Variant,
+    params: &CodecParameters,
+) -> Result<yamaha::Chip> {
+    match params.options.get("chip") {
+        None => Ok(yamaha::Chip::Aica),
+        Some(v) => {
+            if variant != Variant::Yamaha {
+                return Err(Error::unsupported(format!(
+                    "adpcm: chip option {v:?} is only valid for adpcm_yamaha, not {variant:?}"
+                )));
+            }
+            match v {
+                "aica" => Ok(yamaha::Chip::Aica),
+                "opna" => Ok(yamaha::Chip::Opna),
+                other => Err(Error::unsupported(format!(
+                    "adpcm_yamaha: chip option {other:?} not supported (aica or opna)"
+                ))),
+            }
+        }
+    }
+}
+
+/// Parse the `nibble_order` codec option into a [`dialogic::NibbleOrder`].
+///
+/// Accepted only for [`Variant::Dialogic`] (OKI / Dialogic VOX): `"hi"`
+/// (default; Dialogic VOX / MSM6295) or `"lo"` (MSM6258). Absent ⇒
+/// `NibbleOrder::HiFirst`. For any other variant a present option is
+/// rejected.
+pub(crate) fn parse_dialogic_order_option(
+    variant: Variant,
+    params: &CodecParameters,
+) -> Result<dialogic::NibbleOrder> {
+    match params.options.get("nibble_order") {
+        None => Ok(dialogic::NibbleOrder::HiFirst),
+        Some(v) => {
+            if variant != Variant::Dialogic {
+                return Err(Error::unsupported(format!(
+                    "adpcm: nibble_order option {v:?} is only valid for adpcm_dialogic, not {variant:?}"
+                )));
+            }
+            match v {
+                "hi" => Ok(dialogic::NibbleOrder::HiFirst),
+                "lo" => Ok(dialogic::NibbleOrder::LoFirst),
+                other => Err(Error::unsupported(format!(
+                    "adpcm_dialogic: nibble_order option {other:?} not supported (hi or lo)"
+                ))),
+            }
+        }
+    }
+}
+
 pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     let variant = Variant::from_codec_id(&params.codec_id).ok_or_else(|| {
         Error::unsupported(format!(
@@ -529,6 +586,20 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         }
         None => None,
     };
+    // `chip` codec option — Yamaha ADPCM-B emulates one of two
+    // documented chip families whose step-adaptation constants differ:
+    // `aica` (default; AICA FQ8005 / Y8950 / YMZ280B, the WAV-tag-0x0020
+    // convention) or `opna` (YM2608 OPNA Application Manual Table 5-1).
+    // The synthesis recurrence is identical; only the per-magnitude step
+    // multiplier table differs, so a long stream diverges when decoded
+    // against the wrong constants. Other variants reject the option.
+    let yamaha_chip = parse_yamaha_chip_option(variant, params)?;
+    // `nibble_order` codec option — OKI / Dialogic chips read the two
+    // nibbles in a byte in opposite orders: `hi` (default; Dialogic VOX /
+    // MSM6295, high nibble = first sample) or `lo` (MSM6258, low nibble =
+    // first sample). The arithmetic is identical; only the unpack order
+    // differs. Other variants reject the option.
+    let dialogic_order = parse_dialogic_order_option(variant, params)?;
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
         variant,
@@ -536,8 +607,10 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         ima_bits,
         ms_coeffs,
         block_align,
+        dialogic_order,
         pending: None,
-        yamaha_state: vec![yamaha::Channel::default(); channels as usize],
+        yamaha_chip,
+        yamaha_state: vec![yamaha::Channel::for_chip(yamaha_chip); channels as usize],
         yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
         dialogic_state: vec![dialogic::Channel::default(); channels as usize],
         eof: false,
@@ -570,9 +643,18 @@ pub struct AdpcmDecoder {
     // stream one-block-per-packet. The QuickTime IMA path derives its own
     // fixed 34-byte block and ignores this field.
     block_align: Option<usize>,
+    // OKI / Dialogic nibble unpack order from the `nibble_order` codec
+    // option: `HiFirst` (default; Dialogic VOX / MSM6295) or `LoFirst`
+    // (MSM6258). Unused by the other variants.
+    dialogic_order: dialogic::NibbleOrder,
     pending: Option<PendingFrame>,
+    // Selected Yamaha ADPCM-B chip (AICA vs OPNA) from the `chip` codec
+    // option; retained so `reset` re-seeds the per-channel state with the
+    // same constants instead of falling back to the default.
+    yamaha_chip: yamaha::Chip,
     // Yamaha carries state across packets; the other block-oriented
-    // variants re-seed per block.
+    // variants re-seed per block. The per-channel `chip` field (set from
+    // the `chip` codec option) selects the AICA vs OPNA step constants.
     yamaha_state: Vec<yamaha::Channel>,
     // Yamaha ADPCM-A is also stream-oriented (12-bit silicon).
     yamaha_a_state: Vec<yamaha_a::Channel>,
@@ -669,7 +751,7 @@ impl AdpcmDecoder {
             Variant::Dialogic => dialogic::decode_packet(
                 &pkt.data,
                 &mut self.dialogic_state,
-                dialogic::NibbleOrder::HiFirst,
+                self.dialogic_order,
                 dialogic::Output::Wide16,
             ),
         };
@@ -735,7 +817,7 @@ impl Decoder for AdpcmDecoder {
         // Re-seed per-channel Yamaha (A + B) + Dialogic state. MS /
         // IMA are memoryless per block so no further action needed.
         for st in &mut self.yamaha_state {
-            *st = yamaha::Channel::default();
+            *st = yamaha::Channel::for_chip(self.yamaha_chip);
         }
         for st in &mut self.yamaha_a_state {
             *st = yamaha_a::Channel::default();
