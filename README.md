@@ -192,7 +192,10 @@ constants (uncopyrightable facts).
   transcribed from `docs/audio/adpcm/yamaha/yamaha-adpcm.md` §3
   (independent hardware-RE consensus verified against real silicon).
   Single channel per stream by chip design; 12→16-bit narrowing handled
-  internally.
+  internally. The per-sample reconstruction follows the doc §3 rule
+  `delta = (step·mmm)/8 + step/16 = step·(2·mmm+1)/16`, so at the minimum
+  step (16) the eight magnitude levels are the documented `{1,3,5,…,15}`
+  ladder; encode and decode share the recurrence bit-for-bit.
 - **OKI / Dialogic VOX ADPCM** — 49-entry step table and 8-entry
   step-pointer adjustment from Dialogic Corporation's *Dialogic ADPCM
   Algorithm* application note (doc 00-1366-001, 1988). Headerless `.vox`

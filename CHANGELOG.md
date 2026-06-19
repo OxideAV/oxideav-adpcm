@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Yamaha ADPCM-A (`adpcm_yamaha_a`) decode-level fidelity fix. The
+  per-sample reconstruction used `delta = step·(2·mmm+1)/8`, exactly
+  double the staged trace doc §3 rule `delta = (step·mmm)/8 + step/16 =
+  step·(2·mmm+1)/16`. The encoder mirrored the same doubled levels, so
+  self round-trips were unaffected, but decoding a real YM2610-encoded
+  ADPCM-A stream produced twice the correct amplitude. Both decode and
+  encode now use the documented `>> 4` shift; a new unit test pins the
+  `{1,3,5,…,15}` level ladder at the minimum step against doc §3.
 - Registry `chip` codec option for Yamaha ADPCM-B (`adpcm_yamaha`) and
   `nibble_order` codec option for OKI / Dialogic (`adpcm_dialogic`). The
   `yamaha::Chip` (AICA default / OPNA) and `dialogic::NibbleOrder`

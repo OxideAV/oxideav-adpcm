@@ -30,14 +30,18 @@
 //! Given the 4-bit nibble `s mmm` (1 sign bit `s`, 3 magnitude bits `mmm`):
 //!
 //! ```text
-//! delta = (step_size[idx] * (2*mmm + 1)) / 8
+//! delta = (step_size[idx] * mmm) / 8 + step_size[idx] / 16
+//!       = (step_size[idx] * (2*mmm + 1)) / 16
 //! acc   = clamp(acc ± delta, -2048, 2047)              // 12-bit signed
 //! idx   = clamp(idx + step_adj[nibble], 0, 48)         // 49-entry pointer
 //! ```
 //!
+//! (transcribed verbatim from `audio/adpcm/yamaha/yamaha-adpcm.md` §3 —
+//! for `step = 16` the eight levels are `{1, 3, 5, …, 15}`).
+//!
 //! The encoder is the textbook closed-form quantiser: sign from
-//! `dn = target - acc`, magnitude from `|dn|` against the 7-threshold
-//! ladder `{step·1/8, step·3/8, step·5/8, …, step·13/8}` corresponding
+//! `dn = target - acc`, magnitude from `|dn|` against the 8-level
+//! ladder `{step·1/16, step·3/16, step·5/16, …, step·15/16}` corresponding
 //! to the eight per-`mmm` reconstruction levels. The chosen nibble is
 //! fed back through [`decode_nibble`] so encoder + decoder share the
 //! same trajectory bit-for-bit.
@@ -92,12 +96,14 @@ pub fn decode_nibble(state: &mut Channel, nibble: u8, output: Output) -> i16 {
         .clamp(YAMAHA_A_PREDICTOR_MIN, YAMAHA_A_PREDICTOR_MAX);
     let step = YAMAHA_A_STEP_SIZE[state.step_index as usize] as i32;
 
-    // Reconstruction contribution. The chip formula `delta = step *
-    // (2*mag + 1) / 8` collapses the (mag/4 + 1/16)·step decode rule of
-    // the staged trace doc to a single integer multiply + shift. Using
-    // i64 for the multiply leaves bit-room across the full
-    // `step ≤ 1552`, `mag ≤ 7` range without overflow.
-    let delta = (step * (2 * mag + 1)) >> 3;
+    // Reconstruction contribution. The staged trace doc (§3) gives the
+    // ADPCM-A decode rule as
+    //   delta = (step * mmm) / 8 + step / 16,
+    // which collapses to the single integer multiply + shift
+    //   delta = step * (2*mmm + 1) / 16
+    // (e.g. for step = 16 this yields the level ladder {1,3,5,…,15}).
+    // `step ≤ 1552`, `mag ≤ 7` ⇒ `step*(2*mag+1) ≤ 23280`, well inside i32.
+    let delta = (step * (2 * mag + 1)) >> 4;
     if sign {
         state.acc -= delta;
     } else {
@@ -147,13 +153,10 @@ pub fn decode_packet(packet: &[u8], state: &mut [Channel], output: Output) -> Ve
 /// and advance `state` via [`decode_nibble`].
 ///
 /// Closed form: the decoder produces eight possible signed deltas
-/// `± (2*mag + 1) * step / 8` for `mag ∈ 0..=7`. The optimal magnitude
+/// `± (2*mag + 1) * step / 16` for `mag ∈ 0..=7`. The optimal magnitude
 /// for a residual `dn = target - acc` is the one that places
-/// `(2*mag + 1)` closest to `8*|dn|/step`. Solving for `mag` gives
-/// `mag = round((8*|dn|/step - 1) / 2) = (4*|dn|/step) / 1`, clamped to
-/// `[0, 7]`. We compute `(4*|dn| / step)` first; that index is the
-/// largest `k` for which `(2*k + 1) * step ≤ 8*|dn|`, then we round up
-/// when `8*|dn|` falls in the upper half of the `k → k+1` boundary.
+/// `(2*mag + 1)` closest to `16*|dn|/step`. We sweep all eight magnitudes
+/// and keep the one whose reconstruction level is closest to `|dn|`.
 ///
 /// Returns the chosen nibble plus the reconstructed sample (12-bit
 /// native, regardless of the caller's `Output`).
@@ -185,8 +188,8 @@ pub fn encode_sample(state: &mut Channel, target: i16, output: Output) -> (u8, i
     let step = YAMAHA_A_STEP_SIZE[state.step_index as usize] as i64;
 
     // Pick magnitude `m ∈ 0..=7` minimising
-    //   | abs_dn  -  (2*m + 1) * step / 8 |.
-    // Equivalent: pick `m` so `(2*m + 1)` is closest to `8 * abs_dn / step`.
+    //   | abs_dn  -  (2*m + 1) * step / 16 |.
+    // Equivalent: pick `m` so `(2*m + 1)` is closest to `16 * abs_dn / step`.
     // Use a direct sweep from 7 downward — eight branches is negligible
     // and avoids any rounding-direction subtlety on the chip's integer
     // divide. The decoder-loop pattern matches the other stream-oriented
@@ -194,7 +197,7 @@ pub fn encode_sample(state: &mut Channel, target: i16, output: Output) -> (u8, i
     let mut best_mag: u8 = 0;
     let mut best_err: i64 = i64::MAX;
     for m in 0..=7i64 {
-        let level = ((2 * m + 1) * step) >> 3;
+        let level = ((2 * m + 1) * step) >> 4;
         let err = (abs_dn - level).abs();
         if err < best_err {
             best_err = err;
@@ -235,15 +238,38 @@ mod tests {
     use super::*;
 
     #[test]
-    fn zero_nibble_positive_grows_acc_by_step_over_8() {
-        // mag=0 → delta = step * (2*0+1) / 8 = step/8. step[0] = 16 →
-        // delta = 2. Sign clear → acc moves +2.
+    fn zero_nibble_positive_grows_acc_by_step_over_16() {
+        // mag=0 → delta = step * (2*0+1) / 16 = step/16. step[0] = 16 →
+        // delta = 1 (the doc §3 `(step*mmm)/8 + step/16` level ladder).
+        // Sign clear → acc moves +1.
         let mut st = Channel::default();
         let s = decode_nibble(&mut st, 0x0, Output::Native12);
-        assert_eq!(st.acc, 2);
-        assert_eq!(s, 2);
+        assert_eq!(st.acc, 1);
+        assert_eq!(s, 1);
         // step_index decreased by 1 (clamped to 0 — was already 0).
         assert_eq!(st.step_index, 0);
+    }
+
+    #[test]
+    fn decode_levels_match_doc_section_3_ladder_at_min_step() {
+        // The staged trace doc §3 gives `delta = (step*mmm)/8 + step/16`.
+        // At step_index 0 (step = 16) that ladder is exactly
+        //   mmm: 0  1  2  3  4  5  6  7
+        //   Δ:   1  3  5  7  9 11 13 15
+        // i.e. `2*mmm + 1`. Decode each magnitude from a *fresh* state
+        // (step stays at 16 because step_adj for the first step keeps the
+        // pointer pinned to 0 for the small codes and clamps low) and
+        // confirm the first reconstructed sample equals the doc level.
+        for mmm in 0u8..=7 {
+            let mut st = Channel::default();
+            let s = decode_nibble(&mut st, mmm, Output::Native12);
+            let want = (2 * mmm as i32 + 1) * 16 / 16; // = 2*mmm + 1
+            assert_eq!(s as i32, want, "positive mag {mmm}");
+            // Negative sign mirrors.
+            let mut sn = Channel::default();
+            let neg = decode_nibble(&mut sn, mmm | 0x08, Output::Native12);
+            assert_eq!(neg as i32, -want, "negative mag {mmm}");
+        }
     }
 
     #[test]
