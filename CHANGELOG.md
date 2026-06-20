@@ -21,9 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trailer; a minimal CAF `desc`+`data` for the WAV-tag-less QuickTime
   `ima4`), hands the container to the opaque validator to decode back to
   PCM, and cross-correlates the reconstruction against the original
-  per channel (> 0.97). Six cases: MS mono/stereo, IMA-WAV mono/stereo,
+  per channel (> 0.97). Nine cases: MS mono/stereo, IMA-WAV mono/stereo,
   IMA-QT mono/stereo — covering the stereo block-interleave wire layout
-  in both directions. Skips cleanly when the validator binary is absent.
+  in both directions — plus three broadband cases (a four-partial signal
+  instead of a pure tone) where MS / IMA-WAV additionally use a 256-byte
+  block so the encoder must write a non-default `wSamplesPerBlock` the
+  validator honours to frame the stream. Skips cleanly when the validator
+  binary is absent.
 - Yamaha ADPCM-A (`adpcm_yamaha_a`) decode-level fidelity fix. The
   per-sample reconstruction used `delta = step·(2·mmm+1)/8`, exactly
   double the staged trace doc §3 rule `delta = (step·mmm)/8 + step/16 =

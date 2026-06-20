@@ -52,6 +52,31 @@ fn sine_pcm(n: usize, hz: f64, sample_rate: f64, amp: f64) -> Vec<i16> {
         .collect()
 }
 
+/// Deterministic broadband mono signal: a sum of four detuned partials
+/// plus a slow envelope. A pure tone barely moves the predictor; a
+/// multi-tone waveform forces the MS per-block coefficient search and the
+/// IMA step adaptation to track a richer spectrum, so it is a stronger
+/// wire-conformance stress than a single sine.
+fn broadband_pcm(n: usize, sample_rate: f64, amp: f64) -> Vec<i16> {
+    let partials = [220.0, 523.0, 941.0, 1637.0];
+    (0..n)
+        .map(|i| {
+            let t = i as f64 / sample_rate;
+            let env = 0.6 + 0.4 * (2.0 * std::f64::consts::PI * 3.0 * t).sin();
+            let s: f64 = partials
+                .iter()
+                .enumerate()
+                .map(|(k, &f)| {
+                    let w = 1.0 / (k as f64 + 1.0);
+                    w * (2.0 * std::f64::consts::PI * f * t).sin()
+                })
+                .sum::<f64>()
+                / 2.0833; // normalise Σ(1/k) so the peak stays near ±amp
+            (s * env * amp).round().clamp(-32767.0, 32767.0) as i16
+        })
+        .collect()
+}
+
 /// Interleaved multi-channel sine: each lane is the same `hz` tone with a
 /// distinct phase so the per-lane content differs (a real stereo block).
 fn interleaved_sine(
@@ -510,4 +535,65 @@ fn ima_qt_mono_encoder_bytes_decode_in_validator() {
 fn ima_qt_stereo_encoder_bytes_decode_in_validator() {
     let pcm = interleaved_sine(2, ima_qt::QT_SAMPLES_PER_BLOCK * 20, 440.0, 22050.0, 9000.0);
     encoder_validate_ima_qt("ima_qt_stereo", 2, &pcm, 0.97);
+}
+
+// ---------------------------------------------------------------------------
+// Broadband-content + non-default-geometry encoder validation.
+//
+// A pure tone barely exercises the encoder's adaptive machinery. These
+// cases feed a four-partial broadband signal (so the MS per-block
+// coefficient search and the IMA step adaptation actually have to track a
+// moving spectrum) and, for MS / IMA-WAV, also a *smaller* block size so
+// the encoder writes a non-default `wSamplesPerBlock` the validator must
+// honour to split the stream correctly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ms_broadband_small_block_encoder_bytes_decode_in_validator() {
+    // 256-byte block → samplesPerBlock differs from the 1024-byte default,
+    // so the validator relies on our header's wSamplesPerBlock to frame.
+    let block_size = 256usize;
+    let spb = Variant::Ms
+        .samples_per_block(1, block_size)
+        .expect("MS small-block geometry");
+    let pcm = broadband_pcm(spb * 8, 22050.0, 8000.0);
+    let ext = ms_fmt_ext(spb as u16);
+    encoder_validate_wav(
+        "ms_broadband",
+        0x0002,
+        1,
+        block_size,
+        spb,
+        &pcm,
+        |chunk| ms_encode_block(chunk, 1, block_size).unwrap(),
+        &ext,
+        0.92,
+    );
+}
+
+#[test]
+fn ima_wav_broadband_small_block_encoder_bytes_decode_in_validator() {
+    let block_size = 256usize;
+    let spb = Variant::ImaWav
+        .samples_per_block(1, block_size)
+        .expect("IMA-WAV small-block geometry");
+    let pcm = broadband_pcm(spb * 8, 22050.0, 8000.0);
+    let ext = ima_wav_fmt_ext(spb as u16);
+    encoder_validate_wav(
+        "ima_wav_broadband",
+        0x0011,
+        1,
+        block_size,
+        spb,
+        &pcm,
+        |chunk| ima_encode_block(chunk, 1, block_size).unwrap(),
+        &ext,
+        0.92,
+    );
+}
+
+#[test]
+fn ima_qt_broadband_encoder_bytes_decode_in_validator() {
+    let pcm = broadband_pcm(ima_qt::QT_SAMPLES_PER_BLOCK * 24, 22050.0, 8000.0);
+    encoder_validate_ima_qt("ima_qt_broadband", 1, &pcm, 0.92);
 }
