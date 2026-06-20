@@ -150,6 +150,18 @@ container and the harness pulls the raw 34-byte `ima4` blocks straight
 out of the CAF `data` chunk before feeding the decoder. Fixtures are
 generated on demand and skipped when the validator binary is absent.
 
+`tests/encode_validate.rs` runs the *opposite* direction — it proves our
+**encoder** emits spec-conformant bytes, not merely bytes our own decoder
+accepts. A PCM sine is encoded by our block encoder, wrapped in a
+container the harness assembles itself (a RIFF/WAVE `fmt `+`data` for MS
+and IMA-WAV — including the MS `wSamplesPerBlock`/`wNumCoef`/`aCoeff[]`
+trailer — and a minimal CAF `desc`+`data` for the WAV-tag-less QuickTime
+`ima4`), then handed to the opaque validator to decode back to PCM and
+cross-correlated (> 0.97) against the original input, per channel. Six
+cases cover MS, IMA-WAV and IMA-QT in mono and stereo, so the stereo
+block-interleave wire layout is validated in both encode and decode
+directions. Skipped when the validator binary is absent.
+
 A coverage-guided [`cargo-fuzz`](https://rust-fuzz.github.io/book/cargo-fuzz.html)
 harness under `fuzz/` exposes per-variant decode and encode targets:
 

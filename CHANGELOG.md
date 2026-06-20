@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Encoder-output wire-conformance validation (`tests/encode_validate.rs`).
+  The existing end-to-end coverage proved our *decoder* tracks an opaque
+  validator's decode, and the self round-trip tests proved our encoder
+  and decoder agree — but nothing proved our *encoder* emits bytes an
+  independent decoder reconstructs faithfully (i.e. that the blocks we
+  write are spec-conformant on the wire, not merely self-consistent).
+  The new harness closes that direction: it encodes a PCM sine with our
+  encoder, wraps the bytes in a spec-correct container assembled in-test
+  (a RIFF/WAVE `fmt `+`data` for MS / IMA-WAV including the MS coefficient
+  trailer; a minimal CAF `desc`+`data` for the WAV-tag-less QuickTime
+  `ima4`), hands the container to the opaque validator to decode back to
+  PCM, and cross-correlates the reconstruction against the original
+  per channel (> 0.97). Six cases: MS mono/stereo, IMA-WAV mono/stereo,
+  IMA-QT mono/stereo — covering the stereo block-interleave wire layout
+  in both directions. Skips cleanly when the validator binary is absent.
 - Yamaha ADPCM-A (`adpcm_yamaha_a`) decode-level fidelity fix. The
   per-sample reconstruction used `delta = step·(2·mmm+1)/8`, exactly
   double the staged trace doc §3 rule `delta = (step·mmm)/8 + step/16 =
