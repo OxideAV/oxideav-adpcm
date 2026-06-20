@@ -6,8 +6,9 @@
 
 // ---------------- Microsoft ADPCM ----------------
 //
-// Source: Microsoft ADPCM (WAVEFORMATEX tag 0x0002) algorithm — see
-// <https://wiki.multimedia.cx/index.php/Microsoft_ADPCM>.
+// Source: Microsoft ADPCM (WAVEFORMATEX tag 0x0002) algorithm, as
+// documented in the staged RIFF/WAVE ADPCM specifications under
+// docs/audio/adpcm/.
 
 /// 16-entry delta-adaptation multipliers, indexed by the raw 4-bit nibble.
 ///
@@ -25,9 +26,8 @@ pub const MS_ADAPT_COEFF2: [i32; 7] = [0, -256, 0, 64, 0, -208, -232];
 
 // ---------------- IMA ADPCM ----------------
 //
-// Sources:
-// * <https://wiki.multimedia.cx/index.php/IMA_ADPCM>
-// * IMA "Recommended Practices for Digital Audio — DVI Standard Version".
+// Source: IMA "Recommended Practices for Digital Audio — DVI Standard
+// Version" (staged under docs/audio/adpcm/ima/).
 //
 // These two tables are identical across every IMA variant we handle (WAV,
 // QuickTime, and any future IMA flavour).
