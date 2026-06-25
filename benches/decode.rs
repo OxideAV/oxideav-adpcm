@@ -422,6 +422,33 @@ fn bench_decode_dialogic_mono_1s_lofirst_native12(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_decode_dialogic_stereo_1s_hifirst_wide16(c: &mut Criterion) {
+    // 8 kHz stereo VOX, 1 s. Nibbles round-robin across the two channels
+    // (nibble 0 -> L, nibble 1 -> R, …), so the same 4 000-byte packet
+    // decodes 4 000 samples per channel. Exercises the multi-channel
+    // cursor-advance arm of `decode_packet`.
+    let bytes = build_bytes(4_000, 0x5715_2A0E);
+    let mut g = c.benchmark_group("decode_dialogic_stereo_1s_hifirst_wide16");
+    g.throughput(Throughput::Bytes(bytes.len() as u64));
+    g.bench_function(
+        BenchmarkId::from_parameter("dialogic/stereo/8kHz/1s/hifirst/wide16"),
+        |b| {
+            b.iter(|| {
+                let mut state = [dialogic::Channel::default(), dialogic::Channel::default()];
+                let src = criterion::black_box(&bytes);
+                let pcm = dialogic::decode_packet(
+                    src,
+                    &mut state,
+                    dialogic::NibbleOrder::HiFirst,
+                    dialogic::Output::Wide16,
+                );
+                criterion::black_box(pcm)
+            });
+        },
+    );
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_decode_ms_mono_256b_blocks_1s,
@@ -435,5 +462,6 @@ criterion_group!(
     bench_decode_yamaha_a_mono_1s_wide16,
     bench_decode_dialogic_mono_1s_hifirst_wide16,
     bench_decode_dialogic_mono_1s_lofirst_native12,
+    bench_decode_dialogic_stereo_1s_hifirst_wide16,
 );
 criterion_main!(benches);

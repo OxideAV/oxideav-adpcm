@@ -185,7 +185,8 @@ harness under `fuzz/` exposes per-variant decode and encode targets:
 ## Benchmarks
 
 A Criterion harness at `benches/decode.rs` covers the per-block /
-per-packet decode hot path across all six variants (11 scenarios). All
+per-packet decode hot path across all six variants (12 scenarios,
+including the Dialogic stereo nibble-interleave path). All
 inputs are synthesised in-bench from a deterministic seed — block
 variants build a valid buffer via the public encoder so the timed loop
 measures only the decoder. No fixtures are read.

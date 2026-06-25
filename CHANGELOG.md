@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Dialogic **stereo** decode benchmark (`benches/decode.rs`,
+  `decode_dialogic_stereo_1s_hifirst_wide16`) mirroring the Yamaha-B
+  stereo scenario, so the multi-channel nibble-interleave cursor-advance
+  arm is on the timed hot path (12 scenarios total).
+
 - Decoder-side coverage for the OKI / Dialogic **stereo** path
   (`tests/decoder_fuzz.rs`): a two-channel never-panic / state-bounds
   sweep across both nibble orders and several packet lengths, plus a
