@@ -287,6 +287,52 @@ fn dialogic_encoder_extreme_state_seed_never_panics() {
     let _ = dialogic::encode_packet(&[0; 64], &mut state, dialogic::NibbleOrder::LoFirst);
 }
 
+#[test]
+fn dialogic_encode_packet_multi_random_pcm_never_panics() {
+    // The stereo (multi-channel) VOX encode path must tolerate any
+    // interleaved PCM length, odd or even, under both nibble orders and
+    // for 1..=2 channels, without panicking or mis-sizing the output.
+    let mut rng = Lcg::new(0x00D1_000Au64);
+    for order in [
+        dialogic::NibbleOrder::HiFirst,
+        dialogic::NibbleOrder::LoFirst,
+    ] {
+        for chs in [1usize, 2usize] {
+            let mut state = vec![dialogic::Channel::default(); chs];
+            for _ in 0..64 {
+                // Interleaved sample count is sometimes odd (not a whole
+                // number of frames) to stress the trailing-pad path.
+                let n = (rng.next_u64() as usize) % 257;
+                let pcm = rng.pcm(n);
+                let out = dialogic::encode_packet_multi(&pcm, &mut state, order);
+                assert_eq!(out.len(), n.div_ceil(2));
+            }
+        }
+    }
+}
+
+#[test]
+fn dialogic_encode_packet_multi_extreme_state_seed_never_panics() {
+    // Per-channel adversarial seeds (out-of-range predictor / step index)
+    // must clamp, not overflow, in the shared decode_nibble advance path.
+    let mut state = vec![
+        dialogic::Channel {
+            predictor: 900_000,
+            step_index: -50,
+        },
+        dialogic::Channel {
+            predictor: -900_000,
+            step_index: 900,
+        },
+    ];
+    let _ = dialogic::encode_packet_multi(&[0; 65], &mut state, dialogic::NibbleOrder::HiFirst);
+    let _ = dialogic::encode_packet_multi_wide16(
+        &[i16::MIN, i16::MAX, 0, -1, 1, 12345],
+        &mut state,
+        dialogic::NibbleOrder::LoFirst,
+    );
+}
+
 // ---------- Cross-variant trait-level end-to-end ----------
 
 #[test]
@@ -341,8 +387,9 @@ fn registry_encoder_handles_random_pcm_bytes_without_panic() {
         CODEC_ID_DIALOGIC,
     ] {
         for chs in [1u16, 2u16] {
-            // ADPCM-A and Dialogic registry path is mono only.
-            if chs == 2 && (id == CODEC_ID_YAMAHA_A || id == CODEC_ID_DIALOGIC) {
+            // ADPCM-A registry path is mono only; Dialogic now accepts
+            // 1..=2 channels (stereo via nibble interleave).
+            if chs == 2 && id == CODEC_ID_YAMAHA_A {
                 continue;
             }
             let mut p = CodecParameters::audio(CodecId::new(id));

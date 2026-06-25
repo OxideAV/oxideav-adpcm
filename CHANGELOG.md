@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Encoder fuzz coverage for the new OKI / Dialogic multi-channel encode
+  path (`tests/encoder_fuzz.rs`): random interleaved PCM (odd + even
+  lengths) under both nibble orders for 1..=2 channels with exact
+  output-size assertions, plus an adversarial per-channel state-seed
+  case (out-of-range predictor / step index) exercising the shared
+  clamp-on-advance path. The cross-variant registry fuzz test now drives
+  the Dialogic stereo path as well (previously skipped as mono-only).
+
 - OKI / Dialogic VOX **stereo encode** symmetry. The decoder already
   accepted 1..=2 channels (sample-interleaved at the nibble level), but
   the registry encoder hard-rejected anything but mono and the only
