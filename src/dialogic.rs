@@ -262,6 +262,66 @@ pub fn encode_packet_wide16(samples: &[i16], state: &mut Channel, order: NibbleO
     encode_packet(&narrowed, state, order)
 }
 
+/// Encode an interleaved i16-PCM stream of `channels` channels into a VOX
+/// byte stream, the exact inverse of [`decode_packet`] for the same
+/// `channels`.
+///
+/// `samples` is sample-interleaved 12-bit-signed PCM (sample 0 → ch 0,
+/// sample 1 → ch 1, …, wrapping round-robin); each `state[c]` advances
+/// independently across calls. The nibble stream is packed at the
+/// **nibble** level in the same channel round-robin the decoder unpacks:
+/// nibble 0 → ch 0, nibble 1 → ch 1, …, two nibbles per byte per `order`.
+/// This is the multi-channel generalisation of [`encode_packet`]
+/// (`channels == 1` is byte-identical to it).
+///
+/// `state.len()` is the channel count. A trailing odd nibble (an
+/// interleaved sample count that is odd) is padded with a zero nibble at
+/// the byte level, matching [`encode_packet`] and the decoder's
+/// even-byte tolerance.
+pub fn encode_packet_multi(samples: &[i16], state: &mut [Channel], order: NibbleOrder) -> Vec<u8> {
+    let channels = state.len();
+    if channels == 0 || samples.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(samples.len().div_ceil(2));
+    let mut buf: Option<u8> = None;
+    let mut cursor = 0usize;
+    for &s in samples {
+        let (n, _) = encode_sample(&mut state[cursor], s as i32);
+        cursor = (cursor + 1) % channels;
+        match buf.take() {
+            None => buf = Some(n),
+            Some(first) => {
+                let packed = match order {
+                    NibbleOrder::HiFirst => (first << 4) | (n & 0x0F),
+                    NibbleOrder::LoFirst => (n << 4) | (first & 0x0F),
+                };
+                out.push(packed);
+            }
+        }
+    }
+    if let Some(n) = buf {
+        let packed = match order {
+            NibbleOrder::HiFirst => n << 4,
+            NibbleOrder::LoFirst => n & 0x0F,
+        };
+        out.push(packed);
+    }
+    out
+}
+
+/// Multi-channel counterpart of [`encode_packet_wide16`]: takes 16-bit
+/// interleaved PCM, narrows each sample to the native 12-bit range, then
+/// encodes via [`encode_packet_multi`].
+pub fn encode_packet_multi_wide16(
+    samples: &[i16],
+    state: &mut [Channel],
+    order: NibbleOrder,
+) -> Vec<u8> {
+    let narrowed: Vec<i16> = samples.iter().map(|&s| s >> 4).collect();
+    encode_packet_multi(&narrowed, state, order)
+}
+
 /// Length in bytes of the reset preamble (§5: 24 bytes = 48 samples).
 pub const RESET_PREAMBLE_BYTES: usize = 24;
 
@@ -541,6 +601,89 @@ mod tests {
                 st.predictor
             );
         }
+    }
+
+    #[test]
+    fn encode_packet_multi_mono_equals_encode_packet() {
+        // For a single channel, the multi-channel encoder must produce the
+        // byte-identical stream of the mono `encode_packet`.
+        let input: Vec<i16> = (0..200)
+            .map(|i| ((i as f32 * 0.07).sin() * 900.0) as i16)
+            .collect();
+        for order in [NibbleOrder::HiFirst, NibbleOrder::LoFirst] {
+            let mut a = Channel::default();
+            let mono = encode_packet(&input, &mut a, order);
+            let mut b = [Channel::default()];
+            let multi = encode_packet_multi(&input, &mut b, order);
+            assert_eq!(mono, multi, "order {order:?}");
+            // State must also match after the run.
+            assert_eq!(a.predictor, b[0].predictor);
+            assert_eq!(a.step_index, b[0].step_index);
+        }
+    }
+
+    #[test]
+    fn encode_packet_multi_stereo_round_trips_per_lane() {
+        // Two distinct sine lanes, interleaved, encoded with the stereo
+        // (nibble-interleaved) path, then decoded with the same channel
+        // count — each lane's reconstruction tracks its own input.
+        let n = 256usize;
+        let mut interleaved = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let l = ((i as f32 * 0.10).sin() * 1000.0) as i16; // 12-bit range
+            let r = ((i as f32 * 0.05).cos() * 700.0) as i16;
+            interleaved.push(l);
+            interleaved.push(r);
+        }
+        for order in [NibbleOrder::HiFirst, NibbleOrder::LoFirst] {
+            let mut enc = [Channel::default(), Channel::default()];
+            let bytes = encode_packet_multi(&interleaved, &mut enc, order);
+            // Two channels, two samples per byte → byte count is sample/2.
+            assert_eq!(bytes.len(), interleaved.len() / 2);
+            let mut dec = [Channel::default(), Channel::default()];
+            let pcm = decode_packet(&bytes, &mut dec, order, Output::Native12);
+            assert_eq!(pcm.len(), interleaved.len());
+            // Per-lane RMS bound. De-interleave and compare.
+            for lane in 0..2 {
+                let mut acc = 0.0f64;
+                let mut cnt = 0.0f64;
+                let mut idx = lane;
+                while idx < interleaved.len() {
+                    let d = interleaved[idx] as f64 - pcm[idx] as f64;
+                    acc += d * d;
+                    cnt += 1.0;
+                    idx += 2;
+                }
+                let rms = (acc / cnt).sqrt();
+                assert!(
+                    rms < 256.0,
+                    "lane {lane} order {order:?}: RMS {rms} too high"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encode_packet_multi_wide16_narrows_then_encodes() {
+        // The wide16 wrapper must equal narrowing each sample by >>4 then
+        // running encode_packet_multi.
+        let interleaved: Vec<i16> = (0..128)
+            .map(|i| ((i as f32 * 0.2).sin() * 12000.0) as i16)
+            .collect();
+        let mut a = [Channel::default(), Channel::default()];
+        let direct = encode_packet_multi_wide16(&interleaved, &mut a, NibbleOrder::HiFirst);
+        let narrowed: Vec<i16> = interleaved.iter().map(|&s| s >> 4).collect();
+        let mut b = [Channel::default(), Channel::default()];
+        let via = encode_packet_multi(&narrowed, &mut b, NibbleOrder::HiFirst);
+        assert_eq!(direct, via);
+    }
+
+    #[test]
+    fn encode_packet_multi_empty_or_zero_channels_is_empty() {
+        let mut st = [Channel::default(), Channel::default()];
+        assert!(encode_packet_multi(&[], &mut st, NibbleOrder::HiFirst).is_empty());
+        let mut none: [Channel; 0] = [];
+        assert!(encode_packet_multi(&[1, 2, 3], &mut none, NibbleOrder::HiFirst).is_empty());
     }
 
     #[test]

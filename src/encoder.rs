@@ -1172,7 +1172,11 @@ impl Encoder for ImaQtEncoder {
 /// hardware was strictly mono).
 pub struct DialogicEncoder {
     output_params: CodecParameters,
-    state: dialogic::Channel,
+    /// Per-channel quantiser state. Length is the channel count (1 = mono
+    /// VOX, 2 = synthetic stereo via nibble interleave — symmetric with
+    /// [`dialogic::decode_packet`]).
+    state: Vec<dialogic::Channel>,
+    channels: usize,
     /// Nibble pack order from the `nibble_order` codec option: `HiFirst`
     /// (default; Dialogic VOX / MSM6295) or `LoFirst` (MSM6258). The
     /// decoder reads with the matching order.
@@ -1197,17 +1201,19 @@ impl Encoder for DialogicEncoder {
                 ))
             }
         };
-        // Re-use the shared PCM unpacker but for a single channel.
+        // Re-use the shared PCM unpacker for `channels` interleaved lanes.
         let mut pcm: Vec<i16> = Vec::new();
-        push_audio_frame_pcm(&mut pcm, af, 1)?;
+        push_audio_frame_pcm(&mut pcm, af, self.channels)?;
         if pcm.is_empty() {
             return Ok(());
         }
+        // `n_samples` is interleaved across channels; pts counts
+        // samples-per-channel.
         let n_samples = pcm.len() as i64;
-        let bytes = dialogic::encode_packet_wide16(&pcm, &mut self.state, self.order);
+        let bytes = dialogic::encode_packet_multi_wide16(&pcm, &mut self.state, self.order);
         let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
         let pts = self.samples_emitted;
-        self.samples_emitted += n_samples;
+        self.samples_emitted += n_samples / self.channels as i64;
         self.pending
             .push_back(Packet::new(0, tb, bytes).with_pts(pts));
         Ok(())
@@ -1486,11 +1492,10 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             }))
         }
         crate::CODEC_ID_DIALOGIC => {
-            if channels != 1 {
-                return Err(Error::unsupported(format!(
-                    "adpcm_dialogic encoder: only mono supported on the registry path, got {channels}"
-                )));
-            }
+            // VOX is mono in practice but the nibble-interleave layout
+            // generalises to stereo, symmetric with `dialogic::decode_packet`
+            // (which accepts 1..=2 channels). Reject anything above 2.
+            dialogic::validate_channels(channels)?;
             // `nibble_order` codec option selects HiFirst (default;
             // Dialogic VOX / MSM6295) or LoFirst (MSM6258); the encoder
             // packs in that order so the matching decoder reads it back.
@@ -1498,7 +1503,8 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 crate::decoder::parse_dialogic_order_option(crate::Variant::Dialogic, params)?;
             Ok(Box::new(DialogicEncoder {
                 output_params: params.clone(),
-                state: dialogic::Channel::default(),
+                state: vec![dialogic::Channel::default(); channels as usize],
+                channels: channels as usize,
                 order,
                 pending: VecDeque::new(),
                 samples_emitted: 0,
@@ -1746,6 +1752,80 @@ mod tests {
         // No more pending: NeedMore.
         let next = enc.receive_packet();
         assert!(matches!(next, Err(Error::NeedMore)));
+    }
+
+    #[test]
+    fn dialogic_encoder_stereo_round_trips_through_registry_paths() {
+        // The Dialogic registry encoder now accepts stereo (1..=2ch),
+        // symmetric with the decoder. Build a 2-channel encoder, push
+        // interleaved PCM, then decode the emitted bytes with the matching
+        // 2-channel decoder and check per-lane RMS.
+        use crate::decoder::make_decoder;
+        let n = 300usize;
+        let l = sine_pcm(n, 300.0, 8000.0, 8000.0);
+        let r = sine_pcm(n, 700.0, 8000.0, 6000.0);
+        let mut interleaved = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            interleaved.push(l[i]);
+            interleaved.push(r[i]);
+        }
+        let bytes_le: Vec<u8> = interleaved.iter().flat_map(|s| s.to_le_bytes()).collect();
+
+        let mut ep = CodecParameters::audio(CodecId::new(crate::CODEC_ID_DIALOGIC));
+        ep.sample_rate = Some(8000);
+        ep.channels = Some(2);
+        let mut enc = make_encoder(&ep).unwrap();
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: n as u32,
+            pts: Some(0),
+            data: vec![bytes_le],
+        }))
+        .unwrap();
+        let pkt = enc.receive_packet().unwrap();
+        // Two channels, two samples per byte → byte count = interleaved/2.
+        assert_eq!(pkt.data.len(), interleaved.len() / 2);
+
+        // Decode through the registry decoder at 2 channels.
+        let mut dp = CodecParameters::audio(CodecId::new(crate::CODEC_ID_DIALOGIC));
+        dp.sample_rate = Some(8000);
+        dp.channels = Some(2);
+        let mut dec = make_decoder(&dp).unwrap();
+        dec.send_packet(&pkt).unwrap();
+        let frame = dec.receive_frame().unwrap();
+        let Frame::Audio(out) = frame else {
+            panic!("expected audio frame")
+        };
+        let pcm: Vec<i16> = out.data[0]
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(pcm.len(), interleaved.len());
+        for lane in 0..2 {
+            let mut acc = 0.0f64;
+            let mut cnt = 0.0f64;
+            let mut idx = lane;
+            while idx < interleaved.len() {
+                let d = interleaved[idx] as f64 - pcm[idx] as f64;
+                acc += d * d;
+                cnt += 1.0;
+                idx += 2;
+            }
+            let rms = (acc / cnt).sqrt();
+            // 12-bit VOX widened back to 16-bit: quantisation floor is
+            // coarse but per-lane tracking must stay well bounded.
+            assert!(
+                rms < 4000.0,
+                "Dialogic stereo lane {lane}: RMS {rms} too high"
+            );
+        }
+    }
+
+    #[test]
+    fn dialogic_encoder_rejects_three_channels() {
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_DIALOGIC));
+        p.sample_rate = Some(8000);
+        p.channels = Some(3);
+        assert!(make_encoder(&p).is_err());
     }
 
     #[test]

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- OKI / Dialogic VOX **stereo encode** symmetry. The decoder already
+  accepted 1..=2 channels (sample-interleaved at the nibble level), but
+  the registry encoder hard-rejected anything but mono and the only
+  encode entry point (`dialogic::encode_packet`) was single-channel.
+  Added `dialogic::encode_packet_multi` / `encode_packet_multi_wide16` —
+  the exact inverse of `decode_packet` for the same channel count, packing
+  nibbles in the same channel round-robin (nibble 0 → ch 0, nibble 1 →
+  ch 1, …, two nibbles per byte) — and plumbed it through the
+  `DialogicEncoder`, which now accepts 1..=2 channels via the shared
+  `validate_channels` guard. Mono output is byte-identical to the prior
+  `encode_packet`. A registry-path stereo encode→decode round-trip pins
+  per-lane RMS, and dialogic-level tests confirm mono equivalence, the
+  wide16 narrowing wrapper, and stereo per-lane tracking under both
+  nibble orders.
+
 - Encoder-output wire-conformance validation (`tests/encode_validate.rs`).
   The existing end-to-end coverage proved our *decoder* tracks an opaque
   validator's decode, and the self round-trip tests proved our encoder

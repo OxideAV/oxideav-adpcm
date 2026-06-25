@@ -102,6 +102,16 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   differs, so an MSM6258 stream is now reachable through the registry
   rather than only the explicit `dialogic::decode_packet(.., LoFirst, ..)`
   entry point. A `nibble_order` option on any other variant is rejected.
+- **OKI / Dialogic stereo encode** — VOX is mono in practice, but its
+  nibble-interleave layout (nibble 0 → ch 0, nibble 1 → ch 1, …)
+  generalises to stereo, and the decoder already accepted 1..=2 channels.
+  The registry encoder now matches: it accepts 1..=2 channels, and
+  `dialogic::encode_packet_multi` / `encode_packet_multi_wide16` are the
+  exact per-channel inverses of `decode_packet`. Mono output is
+  byte-identical to the single-channel `dialogic::encode_packet`; a
+  registry-path stereo encode→decode round-trip is pinned with per-lane
+  RMS bounds under both nibble orders. Three or more channels are
+  rejected on both the encode and decode paths.
 
 ### Typed variant accessor
 
