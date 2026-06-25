@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Decoder-side coverage for the OKI / Dialogic **stereo** path
+  (`tests/decoder_fuzz.rs`): a two-channel never-panic / state-bounds
+  sweep across both nibble orders and several packet lengths, plus a
+  byte-exact stereo encode→decode self-consistency check — the
+  multi-channel encoder advances per-channel state through the same
+  `decode_nibble` the decoder uses, so a fresh decoder fed the encoder's
+  bytes must reproduce the encoder's reconstructed trajectory per lane
+  with **no error budget** (exact equality, both nibble orders).
+
 - Encoder fuzz coverage for the new OKI / Dialogic multi-channel encode
   path (`tests/encoder_fuzz.rs`): random interleaved PCM (odd + even
   lengths) under both nibble orders for 1..=2 channels with exact

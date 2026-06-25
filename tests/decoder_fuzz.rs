@@ -508,6 +508,75 @@ fn dialogic_wide16_output_stays_within_documented_range() {
     }
 }
 
+/// Dialogic stereo: a two-channel state round-robins nibbles across
+/// channels. Any byte stream decodes to `2 * packet_bytes` samples
+/// (interleaved), and both per-channel states stay inside the documented
+/// predictor / step bounds.
+#[test]
+fn dialogic_stereo_state_emits_two_samples_per_byte() {
+    let mut rng = Lcg::new(0xD1A1_0F3C);
+    for order in [
+        dialogic::NibbleOrder::HiFirst,
+        dialogic::NibbleOrder::LoFirst,
+    ] {
+        for len in [0usize, 1, 7, 65, 512] {
+            let mut packet = vec![0u8; len];
+            rng.fill(&mut packet);
+            let mut state = [dialogic::Channel::default(), dialogic::Channel::default()];
+            let pcm =
+                dialogic::decode_packet(&packet, &mut state, order, dialogic::Output::Native12);
+            assert_eq!(pcm.len(), len * 2, "{order:?} len {len}");
+            for ch in &state {
+                assert!(ch.predictor >= -2048 && ch.predictor <= 2047);
+                assert!(ch.step_index >= 0 && ch.step_index <= 48);
+            }
+        }
+    }
+}
+
+/// Dialogic stereo: the multi-channel encoder advances its per-channel
+/// state through the same `decode_nibble` the decoder uses, so feeding the
+/// encoder's bytes into a fresh two-channel decoder reproduces the
+/// encoder's reconstructed trajectory **byte-exactly** per lane (no error
+/// budget — pure self-consistency of encode vs decode).
+#[test]
+fn dialogic_stereo_encode_decode_is_bit_exact_self_consistent() {
+    let mut rng = Lcg::new(0xD1A1_0F4C);
+    for order in [
+        dialogic::NibbleOrder::HiFirst,
+        dialogic::NibbleOrder::LoFirst,
+    ] {
+        // Even interleaved length so each lane gets a whole sample count.
+        let n_frames = 200usize;
+        let mut interleaved = Vec::with_capacity(n_frames * 2);
+        for _ in 0..n_frames {
+            // 12-bit-range targets (the native VOX domain).
+            interleaved.push((rng.next_u8() as i16) << 2);
+            interleaved.push(-((rng.next_u8() as i16) << 2));
+        }
+        // Encode while capturing the encoder's own reconstruction per
+        // sample, then decode the bytes and require an exact match.
+        let mut enc = [dialogic::Channel::default(), dialogic::Channel::default()];
+        let mut enc_recon = Vec::with_capacity(interleaved.len());
+        let mut cursor = 0usize;
+        for &s in &interleaved {
+            let (_, recon) = dialogic::encode_sample(&mut enc[cursor], s as i32);
+            enc_recon.push(recon);
+            cursor = (cursor + 1) % 2;
+        }
+        // Re-run the packed encode to get the wire bytes.
+        let mut enc2 = [dialogic::Channel::default(), dialogic::Channel::default()];
+        let bytes = dialogic::encode_packet_multi(&interleaved, &mut enc2, order);
+        let mut dec = [dialogic::Channel::default(), dialogic::Channel::default()];
+        let decoded = dialogic::decode_packet(&bytes, &mut dec, order, dialogic::Output::Native12);
+        assert_eq!(decoded.len(), interleaved.len(), "{order:?}");
+        assert_eq!(
+            decoded, enc_recon,
+            "{order:?}: decoder output must equal encoder reconstruction byte-exactly"
+        );
+    }
+}
+
 /// Dialogic: empty state or empty packet produces empty output without
 /// panic.
 #[test]
