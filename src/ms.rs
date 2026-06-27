@@ -113,6 +113,58 @@ pub fn parse_extradata_coeffs(extradata: &[u8]) -> Result<Option<Vec<CoefPair>>>
     Ok(Some(coeffs))
 }
 
+/// Build the Microsoft-ADPCM `extradata` trailer — the inverse of
+/// [`parse_extradata_coeffs`].
+///
+/// Produces the `ADPCMWAVEFORMAT` body that follows the `WAVEFORMATEX`
+/// base, **excluding** the leading `cbSize` word (matching this crate's
+/// `CodecParameters::extradata` convention: the bytes start at
+/// `wSamplesPerBlock`, exactly what [`parse_extradata_coeffs`] consumes).
+/// A WAV muxer writing a `fmt ` chunk prepends `cbSize = returned.len()`.
+///
+/// Layout (all little-endian):
+///
+/// ```text
+/// WORD          wSamplesPerBlock
+/// WORD          wNumCoef
+/// ADPCMCOEFSET  aCoeff[wNumCoef]   // each: i16 iCoef1, i16 iCoef2
+/// ```
+///
+/// `coeffs` must list at least the seven mandatory presets first, exactly
+/// equal to [`STANDARD_COEFFS`] — the same constraint
+/// [`parse_extradata_coeffs`] enforces on the read side, so the produced
+/// trailer always round-trips back through the parser. Passing
+/// [`STANDARD_COEFFS`] yields the classic `cbSize = 32` trailer.
+///
+/// Returns `Err` if `coeffs` has fewer than seven sets or its first seven
+/// disagree with the spec presets.
+pub fn build_extradata(samples_per_block: u16, coeffs: &[CoefPair]) -> Result<Vec<u8>> {
+    if coeffs.len() < 7 {
+        return Err(Error::invalid(format!(
+            "adpcm_ms: build_extradata needs at least the 7 standard \
+             coefficient sets, got {}",
+            coeffs.len()
+        )));
+    }
+    for (i, std) in STANDARD_COEFFS.iter().enumerate() {
+        if coeffs[i] != *std {
+            return Err(Error::invalid(format!(
+                "adpcm_ms: build_extradata coefficient set {i} = {:?} \
+                 disagrees with the mandatory preset {:?}",
+                coeffs[i], std
+            )));
+        }
+    }
+    let mut ext = Vec::with_capacity(4 + coeffs.len() * 4);
+    ext.extend_from_slice(&samples_per_block.to_le_bytes());
+    ext.extend_from_slice(&(coeffs.len() as u16).to_le_bytes());
+    for &(c1, c2) in coeffs {
+        ext.extend_from_slice(&(c1 as i16).to_le_bytes());
+        ext.extend_from_slice(&(c2 as i16).to_le_bytes());
+    }
+    Ok(ext)
+}
+
 /// Per-channel running state carried across the nibbles in a block.
 #[derive(Clone, Copy, Debug)]
 struct ChannelState {
@@ -454,6 +506,46 @@ mod tests {
         let pcm2 = decode_block_with_coeffs(&block, 1, &coeffs2).unwrap();
         // first body nibble: predicted = (1000*512 + 2000*-256)>>8 = (512000-512000)>>8 = 0.
         assert_eq!(pcm2[2], 0);
+    }
+
+    #[test]
+    fn build_extradata_round_trips_through_parser_standard() {
+        // The classic cbSize=32 trailer: build it from the 7 presets,
+        // parse it back, and confirm the coefficient table is identical.
+        let ext = build_extradata(0x01F4, &STANDARD_COEFFS).unwrap();
+        // 2 (spb) + 2 (numCoef) + 7*4 (coeff pairs) = 32 bytes (no cbSize).
+        assert_eq!(ext.len(), 32);
+        // wSamplesPerBlock is the first LE word.
+        assert_eq!(u16::from_le_bytes([ext[0], ext[1]]), 0x01F4);
+        // wNumCoef is the second LE word.
+        assert_eq!(u16::from_le_bytes([ext[2], ext[3]]), 7);
+        let parsed = parse_extradata_coeffs(&ext).unwrap().unwrap();
+        assert_eq!(&parsed[..], &STANDARD_COEFFS[..]);
+    }
+
+    #[test]
+    fn build_extradata_round_trips_with_custom_eighth_pair() {
+        let mut coeffs = STANDARD_COEFFS.to_vec();
+        coeffs.push((128, -32));
+        let ext = build_extradata(1024, &coeffs).unwrap();
+        // 4 + 8*4 = 36 bytes.
+        assert_eq!(ext.len(), 36);
+        let parsed = parse_extradata_coeffs(&ext).unwrap().unwrap();
+        assert_eq!(parsed.len(), 8);
+        assert_eq!(parsed[7], (128, -32));
+        // The produced trailer is byte-identical to a hand-built one.
+        assert_eq!(u16::from_le_bytes([ext[0], ext[1]]), 1024);
+        assert_eq!(u16::from_le_bytes([ext[2], ext[3]]), 8);
+    }
+
+    #[test]
+    fn build_extradata_rejects_short_or_altered_preset_tables() {
+        // Fewer than 7 sets.
+        assert!(build_extradata(256, &STANDARD_COEFFS[..3]).is_err());
+        // First seven not the spec presets.
+        let mut bad = STANDARD_COEFFS.to_vec();
+        bad[0] = (1, 2);
+        assert!(build_extradata(256, &bad).is_err());
     }
 
     #[test]

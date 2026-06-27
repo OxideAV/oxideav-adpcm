@@ -29,7 +29,7 @@ use std::process::Command;
 use oxideav_adpcm::encoder::{
     encode_block as ms_encode_block, ima_encode_block, ima_qt_encode_block,
 };
-use oxideav_adpcm::{ima_qt, ms, Variant};
+use oxideav_adpcm::{ima_qt, Variant};
 
 fn fixtures_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -200,27 +200,32 @@ fn samples_per_block_for(format_tag: u16, channels: u16, block_align: usize) -> 
         .expect("block geometry valid")
 }
 
-/// MS-ADPCM `fmt ` extension: `cbSize` (=32), `wSamplesPerBlock`,
-/// `wNumCoef` (=7), and 7 `i16` coefficient pairs taken from the spec
-/// standard table our decoder also seeds.
-fn ms_fmt_ext(samples_per_block: u16) -> Vec<u8> {
+/// MS-ADPCM `fmt ` extension: `cbSize` followed by the crate-built
+/// `ADPCMWAVEFORMAT` trailer (`wSamplesPerBlock`, `wNumCoef` = 7, and the
+/// 7 preset coefficient pairs). This drives the crate's public
+/// `Variant::build_wave_format_extra` through the opaque validator, so the
+/// helper's bytes are proven wire-conformant (not merely accepted by our
+/// own decoder). `cbSize` is prepended here because the crate convention
+/// excludes it from the trailer body.
+fn ms_fmt_ext(channels: u16, block_align: u16) -> Vec<u8> {
+    let trailer = Variant::Ms
+        .build_wave_format_extra(channels, block_align as usize)
+        .expect("MS WAVEFORMATEX trailer for valid block geometry");
     let mut ext = Vec::new();
-    // cbSize = 2 (spb) + 2 (numCoef) + 7*4 (coeff pairs) = 32.
-    push_u16(&mut ext, 32);
-    push_u16(&mut ext, samples_per_block);
-    push_u16(&mut ext, ms::STANDARD_COEFFS.len() as u16);
-    for &(c1, c2) in ms::STANDARD_COEFFS.iter() {
-        push_u16(&mut ext, c1 as u16);
-        push_u16(&mut ext, c2 as u16);
-    }
+    push_u16(&mut ext, trailer.len() as u16); // cbSize
+    ext.extend_from_slice(&trailer);
     ext
 }
 
-/// IMA-WAV `fmt ` extension: `cbSize` (=2) + `wSamplesPerBlock`.
-fn ima_wav_fmt_ext(samples_per_block: u16) -> Vec<u8> {
+/// IMA-WAV `fmt ` extension: `cbSize` (=2) + the crate-built
+/// `wSamplesPerBlock` word — same provenance guarantee as `ms_fmt_ext`.
+fn ima_wav_fmt_ext(channels: u16, block_align: u16) -> Vec<u8> {
+    let trailer = Variant::ImaWav
+        .build_wave_format_extra(channels, block_align as usize)
+        .expect("IMA-WAV WAVEFORMATEX trailer for valid block geometry");
     let mut ext = Vec::new();
-    push_u16(&mut ext, 2);
-    push_u16(&mut ext, samples_per_block);
+    push_u16(&mut ext, trailer.len() as u16); // cbSize
+    ext.extend_from_slice(&trailer);
     ext
 }
 
@@ -347,7 +352,7 @@ fn ms_mono_encoder_bytes_decode_in_validator() {
         .samples_per_block(1, block_size)
         .expect("MS block geometry");
     let pcm = sine_pcm(spb * 6, 440.0, 22050.0, 9000.0);
-    let ext = ms_fmt_ext(spb as u16);
+    let ext = ms_fmt_ext(1, block_size as u16);
     encoder_validate_wav(
         "ms_mono",
         0x0002,
@@ -368,7 +373,7 @@ fn ms_stereo_encoder_bytes_decode_in_validator() {
         .samples_per_block(2, block_size)
         .expect("MS stereo block geometry");
     let pcm = interleaved_sine(2, spb * 6, 440.0, 22050.0, 9000.0);
-    let ext = ms_fmt_ext(spb as u16);
+    let ext = ms_fmt_ext(2, block_size as u16);
     encoder_validate_wav(
         "ms_stereo",
         0x0002,
@@ -389,7 +394,7 @@ fn ima_wav_mono_encoder_bytes_decode_in_validator() {
         .samples_per_block(1, block_size)
         .expect("IMA-WAV block geometry");
     let pcm = sine_pcm(spb * 6, 440.0, 22050.0, 9000.0);
-    let ext = ima_wav_fmt_ext(spb as u16);
+    let ext = ima_wav_fmt_ext(1, block_size as u16);
     encoder_validate_wav(
         "ima_wav_mono",
         0x0011,
@@ -410,7 +415,7 @@ fn ima_wav_stereo_encoder_bytes_decode_in_validator() {
         .samples_per_block(2, block_size)
         .expect("IMA-WAV stereo block geometry");
     let pcm = interleaved_sine(2, spb * 6, 440.0, 22050.0, 9000.0);
-    let ext = ima_wav_fmt_ext(spb as u16);
+    let ext = ima_wav_fmt_ext(2, block_size as u16);
     encoder_validate_wav(
         "ima_wav_stereo",
         0x0011,
@@ -557,7 +562,7 @@ fn ms_broadband_small_block_encoder_bytes_decode_in_validator() {
         .samples_per_block(1, block_size)
         .expect("MS small-block geometry");
     let pcm = broadband_pcm(spb * 8, 22050.0, 8000.0);
-    let ext = ms_fmt_ext(spb as u16);
+    let ext = ms_fmt_ext(1, block_size as u16);
     encoder_validate_wav(
         "ms_broadband",
         0x0002,
@@ -578,7 +583,7 @@ fn ima_wav_broadband_small_block_encoder_bytes_decode_in_validator() {
         .samples_per_block(1, block_size)
         .expect("IMA-WAV small-block geometry");
     let pcm = broadband_pcm(spb * 8, 22050.0, 8000.0);
-    let ext = ima_wav_fmt_ext(spb as u16);
+    let ext = ima_wav_fmt_ext(1, block_size as u16);
     encoder_validate_wav(
         "ima_wav_broadband",
         0x0011,

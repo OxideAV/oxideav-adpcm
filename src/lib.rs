@@ -760,6 +760,70 @@ mod tests {
     }
 
     #[test]
+    fn build_wave_format_extra_ms_round_trips_through_decoder_extradata() {
+        // For a chosen nBlockAlign, the MS trailer this produces must parse
+        // back through the decoder's extradata path to the standard 7-set
+        // table, and its wSamplesPerBlock must equal samples_per_block().
+        for (ch, block_align) in [(1u16, 256usize), (2, 256), (1, 1024), (2, 512)] {
+            let ext = Variant::Ms
+                .build_wave_format_extra(ch, block_align)
+                .unwrap_or_else(|| panic!("MS extra None for ch={ch} ba={block_align}"));
+            // 2 (spb) + 2 (numCoef) + 7*4 = 32 bytes, no cbSize.
+            assert_eq!(ext.len(), 32, "MS trailer length");
+            let spb = u16::from_le_bytes([ext[0], ext[1]]) as usize;
+            assert_eq!(
+                Some(spb),
+                Variant::Ms.samples_per_block(ch, block_align),
+                "MS wSamplesPerBlock disagrees with samples_per_block"
+            );
+            // Round-trips back through the parser to the standard table.
+            let parsed = crate::ms::parse_extradata_coeffs(&ext).unwrap().unwrap();
+            assert_eq!(&parsed[..], &crate::ms::STANDARD_COEFFS[..]);
+        }
+    }
+
+    #[test]
+    fn build_wave_format_extra_ima_wav_is_samples_per_block_only() {
+        for (ch, block_align) in [(1u16, 256usize), (2, 256), (1, 1024)] {
+            let ext = Variant::ImaWav
+                .build_wave_format_extra(ch, block_align)
+                .unwrap_or_else(|| panic!("IMA-WAV extra None for ch={ch} ba={block_align}"));
+            // IMA-WAV fmt extension is exactly wSamplesPerBlock (2 bytes).
+            assert_eq!(ext.len(), 2, "IMA-WAV trailer length");
+            let spb = u16::from_le_bytes([ext[0], ext[1]]) as usize;
+            assert_eq!(
+                Some(spb),
+                Variant::ImaWav.samples_per_block(ch, block_align)
+            );
+        }
+    }
+
+    #[test]
+    fn build_wave_format_extra_none_for_qt_stream_and_bad_geometry() {
+        // IMA-QT (ISO-BMFF sample entry, not WAV) + the three stream
+        // variants have no WAVEFORMATEX extension here.
+        for &v in &[
+            Variant::ImaQt,
+            Variant::Yamaha,
+            Variant::YamahaA,
+            Variant::Dialogic,
+        ] {
+            assert_eq!(
+                v.build_wave_format_extra(1, 256),
+                None,
+                "{v:?} must have no WAV fmt extension"
+            );
+        }
+        // Block geometry that samples_per_block() rejects → None.
+        // MS body not a whole number of per-channel bytes (ch=2, ba=15).
+        assert_eq!(Variant::Ms.build_wave_format_extra(2, 15), None);
+        // Over-cap channel count.
+        assert_eq!(Variant::Ms.build_wave_format_extra(3, 256), None);
+        // Block smaller than the header.
+        assert_eq!(Variant::ImaWav.build_wave_format_extra(1, 3), None);
+    }
+
+    #[test]
     fn register_via_runtime_context_installs_codec_factory() {
         let mut ctx = oxideav_core::RuntimeContext::new();
         register(&mut ctx);

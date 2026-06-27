@@ -481,6 +481,52 @@ impl Variant {
             Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
         }
     }
+
+    /// Build the codec `extradata` trailer a WAV muxer needs to frame this
+    /// variant's blocks — the `WAVEFORMATEX` extension body (the bytes
+    /// after the 16-byte `WAVEFORMATEX` base), **excluding** the leading
+    /// `cbSize` word, matching this crate's `CodecParameters::extradata`
+    /// convention. A muxer writing a `fmt ` chunk prepends
+    /// `cbSize = returned.len()`.
+    ///
+    /// `block_align` is the WAV `nBlockAlign` (total block bytes across all
+    /// channels) the muxer will use; the trailer's `wSamplesPerBlock` is
+    /// derived from it via [`Self::samples_per_block`], so the value in the
+    /// header is always consistent with the block geometry the decoder
+    /// re-derives.
+    ///
+    /// Per variant:
+    ///
+    /// - `Variant::Ms` → the `ADPCMWAVEFORMAT` trailer
+    ///   (`wSamplesPerBlock` + `wNumCoef = 7` + the seven preset
+    ///   `aCoeff[]` pairs), `cbSize`-equivalent length 32. This is the
+    ///   inverse of [`ms::parse_extradata_coeffs`], so the produced bytes
+    ///   round-trip straight back through the decoder's `extradata` path.
+    /// - `Variant::ImaWav` → `wSamplesPerBlock` only (`cbSize`-equivalent
+    ///   length 2 — the IMA-WAV `fmt ` extension carries no coefficient
+    ///   table).
+    ///
+    /// Returns `None` for:
+    /// - [`Variant::ImaQt`] — QuickTime `ima4` is carried in an ISO-BMFF
+    ///   sample entry, not a WAV `fmt ` chunk, so it has no `WAVEFORMATEX`
+    ///   extension here;
+    /// - the three [`Shape::StreamOriented`] variants (no block framing);
+    /// - any `(channels, block_align)` pair whose
+    ///   [`Self::samples_per_block`] is `None` (invalid block geometry —
+    ///   bad channel count, too-small block, or off-boundary body length).
+    pub fn build_wave_format_extra(self, channels: u16, block_align: usize) -> Option<Vec<u8>> {
+        let spb = self.samples_per_block(channels, block_align)?;
+        // wSamplesPerBlock is a u16 field on the wire; an out-of-range
+        // block geometry has no valid header form.
+        let spb_u16: u16 = spb.try_into().ok()?;
+        match self {
+            Variant::Ms => ms::build_extradata(spb_u16, &ms::STANDARD_COEFFS).ok(),
+            Variant::ImaWav => Some(spb_u16.to_le_bytes().to_vec()),
+            // QuickTime ima4 lives in an ISO-BMFF sample entry, not a WAV
+            // fmt extension; stream variants carry no block header.
+            Variant::ImaQt | Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
+        }
+    }
 }
 
 /// Parse the `chip` codec option into a [`yamaha::Chip`].
