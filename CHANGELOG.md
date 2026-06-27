@@ -24,6 +24,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- `ms::build_extradata` — the inverse of `parse_extradata_coeffs`; emits
+  the MS `ADPCMWAVEFORMAT` trailer body (`wSamplesPerBlock` + `wNumCoef` +
+  `aCoeff[]`, no `cbSize`) for a chosen `wSamplesPerBlock` and coefficient
+  table. `Variant::build_wave_format_extra(channels, block_align)` wraps
+  it as the per-variant WAV-muxer convenience (MS full trailer, IMA-WAV
+  spb-only word, `None` for IMA-QT + stream variants). The
+  `encode_validate.rs` harness now drives its `fmt `-chunk extensions
+  through these helpers, so the opaque-validator decode round-trip proves
+  the produced trailers are wire-conformant.
+
+- Property-style trailer-builder coverage in `tests/encoder_fuzz.rs`: a
+  512-iteration `(variant, channels, block_align)` sweep asserting
+  `build_wave_format_extra` is total and self-consistent
+  (`Some` ⇒ embedded `wSamplesPerBlock` matches `samples_per_block` and
+  MS bytes parse back to the standard table; `None` ⇒ the geometry is
+  also rejected by `samples_per_block` or the variant has no WAV
+  extension), plus an arbitrary-`wSamplesPerBlock` / custom-coefficient
+  `build_extradata` ↔ `parse_extradata_coeffs` strict-inverse check.
+
 - Dialogic **stereo** decode benchmark (`benches/decode.rs`,
   `decode_dialogic_stereo_1s_hifirst_wide16`) mirroring the Yamaha-B
   stereo scenario, so the multi-channel nibble-interleave cursor-advance

@@ -414,3 +414,107 @@ fn registry_encoder_handles_random_pcm_bytes_without_panic() {
         }
     }
 }
+
+// ---------- WAVEFORMATEX trailer builders ----------
+
+#[test]
+fn build_wave_format_extra_swept_geometry_round_trips_or_none() {
+    use oxideav_adpcm::Variant;
+    // Sweep a wide range of (variant, channels, block_align) and assert
+    // the trailer builder is total and self-consistent:
+    //   * Some(bytes) ⇒ the embedded wSamplesPerBlock matches
+    //     samples_per_block(channels, block_align); for MS the bytes parse
+    //     back through the decoder's extradata path to the standard 7-set
+    //     table; for IMA-WAV the trailer is exactly the 2-byte spb word.
+    //   * None ⇒ samples_per_block() also rejects the geometry (the two
+    //     accessors agree on what is encodable), OR the variant has no WAV
+    //     fmt extension (IMA-QT / stream variants).
+    // The builder must never panic on any input in the sweep.
+    let mut rng = Lcg::new(0x00FA_0042u64);
+    for &v in Variant::all() {
+        for _ in 0..512 {
+            let channels = (rng.next_u64() % 10) as u16; // 0..=9 (some invalid)
+            let block_align = (rng.next_u64() % 4096) as usize; // 0..4095
+            let extra = v.build_wave_format_extra(channels, block_align);
+            match extra {
+                Some(bytes) => {
+                    // Builder only returns Some for block-oriented WAV
+                    // variants with valid geometry.
+                    assert!(
+                        matches!(v, Variant::Ms | Variant::ImaWav),
+                        "{v:?} unexpectedly produced a WAV fmt extension"
+                    );
+                    let spb = v
+                        .samples_per_block(channels, block_align)
+                        .expect("Some(extra) implies valid samples_per_block");
+                    // First LE word is always wSamplesPerBlock.
+                    assert!(bytes.len() >= 2, "{v:?}: trailer too short");
+                    let embedded = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+                    assert_eq!(
+                        embedded, spb,
+                        "{v:?} ch={channels} ba={block_align}: embedded spb != samples_per_block"
+                    );
+                    match v {
+                        Variant::Ms => {
+                            assert_eq!(bytes.len(), 32, "MS trailer must be 32 bytes");
+                            let parsed = oxideav_adpcm::ms::parse_extradata_coeffs(&bytes)
+                                .expect("built MS trailer must parse")
+                                .expect("built MS trailer carries a table");
+                            assert_eq!(
+                                &parsed[..],
+                                &oxideav_adpcm::ms::STANDARD_COEFFS[..],
+                                "MS trailer must round-trip to the standard table"
+                            );
+                        }
+                        Variant::ImaWav => {
+                            assert_eq!(bytes.len(), 2, "IMA-WAV trailer is spb only");
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                None => {
+                    // Either no WAV fmt extension for this variant, or the
+                    // geometry is one samples_per_block() also rejects.
+                    let has_wav_ext = matches!(v, Variant::Ms | Variant::ImaWav);
+                    if has_wav_ext {
+                        assert!(
+                            v.samples_per_block(channels, block_align).is_none()
+                                || u16::try_from(
+                                    v.samples_per_block(channels, block_align).unwrap()
+                                )
+                                .is_err(),
+                            "{v:?} ch={channels} ba={block_align}: None but geometry is valid"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn build_extradata_round_trips_for_arbitrary_spb_and_custom_pairs() {
+    use oxideav_adpcm::ms;
+    // For arbitrary wSamplesPerBlock and arbitrary *custom* coefficient
+    // pairs appended after the 7 mandatory presets, build_extradata must
+    // produce bytes that parse_extradata_coeffs accepts and reproduces
+    // exactly. The two are strict inverses over the legal table space.
+    let mut rng = Lcg::new(0x00FA_0043u64);
+    for _ in 0..512 {
+        let spb = rng.next_u64() as u16;
+        let extra_pairs = (rng.next_u64() % 5) as usize; // 0..=4 custom sets
+        let mut coeffs = ms::STANDARD_COEFFS.to_vec();
+        for _ in 0..extra_pairs {
+            let c1 = rng.next_i16() as i32;
+            let c2 = rng.next_i16() as i32;
+            coeffs.push((c1, c2));
+        }
+        let ext = ms::build_extradata(spb, &coeffs).expect("legal table builds");
+        assert_eq!(ext.len(), 4 + coeffs.len() * 4);
+        assert_eq!(u16::from_le_bytes([ext[0], ext[1]]), spb);
+        let parsed = ms::parse_extradata_coeffs(&ext)
+            .expect("built trailer parses")
+            .expect("built trailer carries a table");
+        assert_eq!(parsed, coeffs, "build/parse not inverse (spb={spb})");
+    }
+}
