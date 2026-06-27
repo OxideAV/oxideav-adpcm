@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.6...v0.0.7) - 2026-06-27
+
+### Other
+
+- property-style round-trip fuzz coverage for WAVEFORMATEX trailer builders
+- document reverse tag/fourcc routing + WAVEFORMATEX trailer builders in README
+- WAVEFORMATEX trailer builders for block-oriented WAV encoders
+- Variant reverse tag/fourcc routing (from_wave_format_tag / from_fourcc)
+- Dialogic stereo decode benchmark
+- Dialogic stereo decode coverage + bit-exact roundtrip
+- encoder-fuzz coverage for Dialogic multi-channel encode
+- OKI/Dialogic VOX stereo encode (encode_packet_multi)
+- drop barred multimedia.cx URLs from src/tables.rs provenance comments
+- broadband + non-default-geometry encoder validation
+- encoder-output wire-conformance validation (encode_validate.rs)
+- Yamaha ADPCM-A decode-level fidelity fix (>>4 per doc §3)
+- registry chip (Yamaha ADPCM-B) + nibble_order (Dialogic) codec options
+- fix IMA-WAV 4-bit multichannel encode default block size
+- IMA-QT multichannel block interleave (1..=8 channels)
+- end-to-end validator coverage for IMA-QT (ima4)
+- neutralise black-box-validator naming in wav_decode comment
+- multi-block packet decode for MS / IMA-WAV (block_align option)
+- Dialogic/OKI VOX §5 stream-reset preamble (dialogic::reset_preamble)
+
 ### Added
 
 - `Variant::from_wave_format_tag(u16)` and `Variant::from_fourcc([u8;4])`
