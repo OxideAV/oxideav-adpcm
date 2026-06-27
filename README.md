@@ -75,6 +75,17 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   mandatory presets. Block-level entry points: `ms::decode_block` and
   `ms::decode_block_with_coeffs`, with `ms::parse_extradata_coeffs` /
   `ms::STANDARD_COEFFS` exposed.
+- **WAVEFORMATEX trailer builders** — the inverse serialisation path for
+  WAV muxers. `ms::build_extradata(samples_per_block, coeffs)` produces
+  the MS `ADPCMWAVEFORMAT` body (the inverse of `parse_extradata_coeffs`),
+  and `Variant::build_wave_format_extra(channels, block_align)` is the
+  per-variant convenience: it derives `wSamplesPerBlock` from the block
+  geometry and emits the codec-specific `fmt `-chunk extension (the full
+  MS trailer for `adpcm_ms`, just `wSamplesPerBlock` for `adpcm_ima_wav`),
+  `None` for the FourCC-routed IMA-QT and the headerless stream variants.
+  Both exclude the leading `cbSize` word (the crate's `extradata`
+  convention — the muxer prepends `cbSize = len`), and the MS output
+  round-trips straight back through `parse_extradata_coeffs`.
 - **3-bit IMA / DVI ADPCM** — WAV tag `0x0011` defines both 4-bit (the
   default) and 3-bit code widths. The 3-bit mode shares the block header
   and 89-entry step table but uses a 1-sign + 2-magnitude code, its own
