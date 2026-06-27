@@ -175,6 +175,61 @@ impl Variant {
         }
     }
 
+    /// Reverse of [`Variant::wave_format_tag`] — resolve a
+    /// `WAVEFORMATEX::wFormatTag` to the ADPCM variant that owns it.
+    ///
+    /// This is the typed counterpart of the container's registry
+    /// tag-resolution path: a WAV / AVI demuxer that has parsed the
+    /// `fmt ` chunk's `wFormatTag` can map it straight to a [`Variant`]
+    /// without round-tripping through a [`CodecId`] string. Only the four
+    /// variants with a canonical WAV-format assignment resolve:
+    ///
+    /// - `0x0002` → `Variant::Ms` (`WAVE_FORMAT_ADPCM`).
+    /// - `0x0010` → `Variant::Dialogic` (`WAVE_FORMAT_OKI_ADPCM`).
+    /// - `0x0011` → `Variant::ImaWav` (`WAVE_FORMAT_DVI_ADPCM`).
+    /// - `0x0020` → `Variant::Yamaha` (`WAVE_FORMAT_YAMAHA_ADPCM`).
+    ///
+    /// Every other `wFormatTag` — including tags that belong to *other*
+    /// codec families (`0x0001` PCM, `0x0028` G.722, …) and the two
+    /// tagless ADPCM variants (IMA-QT addressed by FourCC, ADPCM-A
+    /// chip-internal) — returns `None`. The tag assignments mirror the
+    /// `WAVE_FORMAT_*` enumeration staged in
+    /// `docs/audio/adpcm/sdl_sound-wave-types.html`.
+    ///
+    /// `from_wave_format_tag(v.wave_format_tag().unwrap()) == Some(v)` for
+    /// every variant whose `wave_format_tag()` is `Some`.
+    pub const fn from_wave_format_tag(tag: u16) -> Option<Self> {
+        match tag {
+            0x0002 => Some(Variant::Ms),
+            0x0010 => Some(Variant::Dialogic),
+            0x0011 => Some(Variant::ImaWav),
+            0x0020 => Some(Variant::Yamaha),
+            _ => None,
+        }
+    }
+
+    /// Reverse of [`Variant::fourcc`] — resolve a QuickTime / MP4
+    /// sample-entry FourCC to the ADPCM variant that owns it.
+    ///
+    /// Only `*b"ima4"` resolves (to [`Variant::ImaQt`]); every other
+    /// FourCC returns `None`. The typed counterpart of the container's
+    /// FourCC routing for the one ADPCM variant QuickTime addresses by
+    /// sample-entry code rather than `wFormatTag`.
+    ///
+    /// `from_fourcc(v.fourcc().unwrap()) == Some(v)` for every variant
+    /// whose `fourcc()` is `Some`.
+    pub const fn from_fourcc(fourcc: [u8; 4]) -> Option<Self> {
+        // `match` on a byte array is not const-evaluable on all toolchains;
+        // compare the packed big-endian word instead (FourCCs are stored
+        // most-significant-byte-first, matching their textual order).
+        let word = u32::from_be_bytes(fourcc);
+        if word == u32::from_be_bytes(*b"ima4") {
+            Some(Variant::ImaQt)
+        } else {
+            None
+        }
+    }
+
     /// On-wire framing shape — see [`Shape`].
     ///
     /// The three WAV / AVI / QuickTime variants (MS, IMA-WAV, IMA-QT)

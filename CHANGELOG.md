@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Variant::from_wave_format_tag(u16)` and `Variant::from_fourcc([u8;4])`
+  — the reverse of `wave_format_tag()` / `fourcc()`. A WAV / AVI /
+  QuickTime demuxer that has parsed a `WAVEFORMATEX::wFormatTag`
+  (`0x0002` MS, `0x0010` OKI/Dialogic, `0x0011` IMA-WAV, `0x0020`
+  Yamaha-B) or a sample-entry FourCC (`ima4`) can now map it straight to
+  a typed `Variant` without round-tripping through a codec-id string.
+  Tags owned by other codec families (PCM `0x0001`, G.722 `0x0028`, …)
+  and the two tagless variants (IMA-QT addressed by FourCC, ADPCM-A
+  chip-internal) resolve to `None`. Both are `const fn`. Round-trip
+  inversion is pinned for every tagged / fourcc'd variant, and foreign /
+  unknown tags + a case-sensitive `ima4`-only FourCC check are pinned
+  against drift.
+
 ### Other
 
 - Dialogic **stereo** decode benchmark (`benches/decode.rs`,

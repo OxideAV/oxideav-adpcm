@@ -331,6 +331,83 @@ mod tests {
     }
 
     #[test]
+    fn variant_from_wave_format_tag_inverts_wave_format_tag() {
+        // Every variant whose wave_format_tag() is Some must round-trip
+        // through from_wave_format_tag(); the two tagless variants stay
+        // tagless on the reverse path (nothing resolves to them by tag).
+        for &v in Variant::all() {
+            match v.wave_format_tag() {
+                Some(tag) => assert_eq!(
+                    Variant::from_wave_format_tag(tag),
+                    Some(v),
+                    "wave tag {tag:#06x} did not invert back to {v:?}"
+                ),
+                None => {
+                    // ImaQt / YamahaA carry no WAV tag — confirm they are
+                    // unreachable by the reverse lookup at every tag value
+                    // that the tagged variants own.
+                    for &owner in Variant::all() {
+                        if let Some(tag) = owner.wave_format_tag() {
+                            assert_ne!(
+                                Variant::from_wave_format_tag(tag),
+                                Some(v),
+                                "{v:?} is tagless but resolved from {tag:#06x}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn variant_from_wave_format_tag_rejects_foreign_and_unknown_tags() {
+        // Tags owned by other codec families (or unassigned) resolve to
+        // None — the ADPCM crate must not claim them.
+        for tag in [
+            0x0000u16, // WAVE_FORMAT_UNKNOWN
+            0x0001,    // PCM
+            0x0003,    // IEEE float
+            0x0006,    // A-law
+            0x0007,    // mu-law
+            0x0028,    // G.722 (its own crate)
+            0x0045,    // G.726 (its own crate)
+            0xFFFF,    // WAVE_FORMAT_EXTENSIBLE / sentinel
+        ] {
+            assert_eq!(
+                Variant::from_wave_format_tag(tag),
+                None,
+                "tag {tag:#06x} must not resolve to an ADPCM variant"
+            );
+        }
+    }
+
+    #[test]
+    fn variant_from_fourcc_inverts_fourcc() {
+        for &v in Variant::all() {
+            match v.fourcc() {
+                Some(fourcc) => assert_eq!(
+                    Variant::from_fourcc(fourcc),
+                    Some(v),
+                    "fourcc {fourcc:?} did not invert back to {v:?}"
+                ),
+                None => {
+                    // Only ImaQt owns a fourcc; nothing else should resolve.
+                    assert_eq!(Variant::from_fourcc(*b"ima4"), Some(Variant::ImaQt));
+                }
+            }
+        }
+        // Foreign / unknown FourCCs resolve to None.
+        for code in [b"sowt", b"twos", b"ms\x00\x02", b"\0\0\0\0", b"IMA4"] {
+            assert_eq!(
+                Variant::from_fourcc(*code),
+                None,
+                "fourcc {code:?} must not resolve (case-sensitive, ima4 only)"
+            );
+        }
+    }
+
+    #[test]
     fn variant_shape_partitions_block_vs_stream() {
         // Three block-oriented (WAV/AVI/QT — per-block header re-seed)
         // and three stream-oriented (Yamaha-A/B + Dialogic VOX —

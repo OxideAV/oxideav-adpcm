@@ -123,6 +123,10 @@ use oxideav_adpcm::{Shape, Variant};
 
 assert_eq!(Variant::Ms.wave_format_tag(),  Some(0x0002));
 assert_eq!(Variant::ImaQt.fourcc(),        Some(*b"ima4"));
+// Reverse routing for container demuxers (the inverse of the two above):
+assert_eq!(Variant::from_wave_format_tag(0x0011), Some(Variant::ImaWav));
+assert_eq!(Variant::from_fourcc(*b"ima4"),        Some(Variant::ImaQt));
+assert_eq!(Variant::from_wave_format_tag(0x0001), None); // PCM — not ours
 assert_eq!(Variant::Ms.shape(),            Shape::BlockOriented);
 assert_eq!(Variant::Yamaha.shape(),        Shape::StreamOriented);
 assert_eq!(Variant::Ms.max_channels(),     Some(2));
@@ -134,7 +138,12 @@ assert_eq!(Variant::Ms.block_size_bytes(1, 500),   Some(256)); // inverse
 ```
 
 `Variant::all()` iterates every variant; `from_codec_id` / `codec_id`
-round-trip a codec id; `Shape` (block- vs stream-oriented) is also
+round-trip a codec id; `from_wave_format_tag` / `from_fourcc` invert
+`wave_format_tag` / `fourcc` so a WAV / AVI / QuickTime demuxer that has
+parsed a `wFormatTag` or sample-entry FourCC can map it straight to a
+typed `Variant` without round-tripping through a codec-id string (tags
+owned by other families — PCM, G.722, G.726 — and the two tagless
+variants resolve to `None`); `Shape` (block- vs stream-oriented) is also
 re-exported. Lib-side tests pin these accessors against what
 `register_codecs` and the per-block decoders actually do, so a new
 variant must update both surfaces in lockstep.
