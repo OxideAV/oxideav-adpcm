@@ -45,6 +45,7 @@
 pub mod decoder;
 pub mod dialogic;
 pub mod encoder;
+pub mod g726;
 pub mod ima_qt;
 pub mod ima_wav;
 pub mod ms;

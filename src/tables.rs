@@ -238,6 +238,88 @@ pub const YAMAHA_A_PREDICTOR_MIN: i32 = -2048;
 /// Upper bound of the 12-bit signed reconstructed sample.
 pub const YAMAHA_A_PREDICTOR_MAX: i32 = 2047;
 
+// ---------------- ITU-T G.726 ADPCM ----------------
+//
+// Source: ITU-T Recommendation G.726 (12/1990), staged at
+// docs/audio/adpcm/g726/T-REC-G.726-199012-I.pdf, cross-checked against
+// the extracted normative CSVs under docs/audio/adpcm/g726/tables/.
+//
+// G.726 defines four bit-rates (40 / 32 / 24 / 16 kbit/s at 5 / 4 / 3 /
+// 2 bits per sample); each rate has its own three per-code tables:
+//
+//   - RECONST (Tables 11-14/G.726): inverse-quantizer output levels
+//     `DQLN`, indexed directly by the received code `I`. Values are the
+//     raw 12-bit two's-complement words of the spec (`2048` = -2048, the
+//     log-domain "zero" that ANTILOG maps to `dq = 0`; `4030` = -66).
+//   - FUNCTW (§4.2.4): log scale-factor multipliers `W(I)`, indexed by
+//     the code magnitude `IM`. Raw 12-bit two's complement (`4084` = -12).
+//   - FUNCTF (§4.2.5): adaptation-speed control function `F(I)`, indexed
+//     by the code magnitude `IM` (3-bit values 0..=7).
+//
+// The encoder-side quantizer decision levels (Tables 7-10 / 16-19) are
+// threshold ladders, kept next to the QUAN block in [`crate::g726`].
+
+/// G.726 40 kbit/s inverse-quantizer output levels (Table 11/G.726),
+/// indexed by the 5-bit code `I`. Raw 12-bit two's-complement `DQLN`.
+pub const G726_DQLN_40: [u16; 32] = [
+    2048, 4030, 28, 104, 169, 224, 274, 318, 358, 395, 429, 459, 488, 514, 539, 566, 566, 539, 514,
+    488, 459, 429, 395, 358, 318, 274, 224, 169, 104, 28, 4030, 2048,
+];
+
+/// G.726 32 kbit/s inverse-quantizer output levels (Table 12/G.726),
+/// indexed by the 4-bit code `I`. Raw 12-bit two's-complement `DQLN`.
+pub const G726_DQLN_32: [u16; 16] = [
+    2048, 4, 135, 213, 273, 323, 373, 425, 425, 373, 323, 273, 213, 135, 4, 2048,
+];
+
+/// G.726 24 kbit/s inverse-quantizer output levels (Table 13/G.726),
+/// indexed by the 3-bit code `I`. Raw 12-bit two's-complement `DQLN`.
+pub const G726_DQLN_24: [u16; 8] = [2048, 135, 273, 373, 373, 273, 135, 2048];
+
+/// G.726 16 kbit/s inverse-quantizer output levels (Table 14/G.726),
+/// indexed by the 2-bit code `I`. Raw 12-bit two's-complement `DQLN`.
+///
+/// Unlike the three higher rates, the 2-bit quantizer has no log-domain
+/// "zero" code — the smallest magnitude reconstructs to `DQLN = 116`.
+pub const G726_DQLN_16: [u16; 4] = [116, 365, 365, 116];
+
+/// G.726 40 kbit/s scale-factor multipliers `W(I)` (§4.2.4 FUNCTW),
+/// indexed by code magnitude `IM`. Raw 12-bit two's complement.
+pub const G726_WI_40: [u16; 16] = [
+    14, 14, 24, 39, 40, 41, 58, 100, 141, 179, 219, 280, 358, 440, 529, 696,
+];
+
+/// G.726 32 kbit/s scale-factor multipliers `W(I)` (§4.2.4 FUNCTW),
+/// indexed by code magnitude `IM`. Raw 12-bit two's complement
+/// (`4084` = -12).
+pub const G726_WI_32: [u16; 8] = [4084, 18, 41, 64, 112, 198, 355, 1122];
+
+/// G.726 24 kbit/s scale-factor multipliers `W(I)` (§4.2.4 FUNCTW),
+/// indexed by code magnitude `IM`. Raw 12-bit two's complement
+/// (`4092` = -4).
+pub const G726_WI_24: [u16; 4] = [4092, 30, 137, 582];
+
+/// G.726 16 kbit/s scale-factor multipliers `W(I)` (§4.2.4 FUNCTW),
+/// indexed by code magnitude `IM`. Raw 12-bit two's complement
+/// (`4074` = -22).
+pub const G726_WI_16: [u16; 2] = [4074, 439];
+
+/// G.726 40 kbit/s adaptation-speed control `F(I)` (§4.2.5 FUNCTF),
+/// indexed by code magnitude `IM`.
+pub const G726_FI_40: [u16; 16] = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 3, 4, 5, 6, 6];
+
+/// G.726 32 kbit/s adaptation-speed control `F(I)` (§4.2.5 FUNCTF),
+/// indexed by code magnitude `IM`.
+pub const G726_FI_32: [u16; 8] = [0, 0, 0, 1, 1, 1, 3, 7];
+
+/// G.726 24 kbit/s adaptation-speed control `F(I)` (§4.2.5 FUNCTF),
+/// indexed by code magnitude `IM`.
+pub const G726_FI_24: [u16; 4] = [0, 1, 2, 7];
+
+/// G.726 16 kbit/s adaptation-speed control `F(I)` (§4.2.5 FUNCTF),
+/// indexed by code magnitude `IM`.
+pub const G726_FI_16: [u16; 2] = [0, 7];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +469,71 @@ mod tests {
         assert_eq!(YAMAHA_A_INDEX_ADJUST[6], 7);
         assert_eq!(OKI_INDEX_ADJUST[7], 8);
         assert_eq!(YAMAHA_A_INDEX_ADJUST[7], 9);
+    }
+
+    #[test]
+    fn g726_reconst_tables_are_odd_symmetric_in_code_magnitude() {
+        // Tables 11-14/G.726: the upper half of each table (sign bit set)
+        // mirrors the lower half — the DQLN magnitude ladder is shared and
+        // only the DQS sign bit (I >> bits-1) differs.
+        for i in 0..32 {
+            assert_eq!(G726_DQLN_40[i], G726_DQLN_40[31 - i], "40k I={i}");
+        }
+        for i in 0..16 {
+            assert_eq!(G726_DQLN_32[i], G726_DQLN_32[15 - i], "32k I={i}");
+        }
+        for i in 0..8 {
+            assert_eq!(G726_DQLN_24[i], G726_DQLN_24[7 - i], "24k I={i}");
+        }
+        for i in 0..4 {
+            assert_eq!(G726_DQLN_16[i], G726_DQLN_16[3 - i], "16k I={i}");
+        }
+    }
+
+    #[test]
+    fn g726_tables_have_expected_shape() {
+        // The three per-rate table roles are sized by bits-per-code:
+        // RECONST is indexed by the full code (2^bits entries), FUNCTW /
+        // FUNCTF by the code magnitude (2^(bits-1) entries).
+        assert_eq!(G726_DQLN_40.len(), 32);
+        assert_eq!(G726_DQLN_32.len(), 16);
+        assert_eq!(G726_DQLN_24.len(), 8);
+        assert_eq!(G726_DQLN_16.len(), 4);
+        assert_eq!(G726_WI_40.len(), 16);
+        assert_eq!(G726_WI_32.len(), 8);
+        assert_eq!(G726_WI_24.len(), 4);
+        assert_eq!(G726_WI_16.len(), 2);
+        assert_eq!(G726_FI_40.len(), 16);
+        assert_eq!(G726_FI_32.len(), 8);
+        assert_eq!(G726_FI_24.len(), 4);
+        assert_eq!(G726_FI_16.len(), 2);
+        // Spot values per the extracted CSVs (docs/audio/adpcm/g726/
+        // tables/): 32k RECONST starts {2048, 4, 135, ...}; the negative
+        // W(I) entries are 12-bit two's complement.
+        assert_eq!(G726_DQLN_32[0], 2048);
+        assert_eq!(G726_DQLN_32[1], 4);
+        assert_eq!(G726_DQLN_32[2], 135);
+        assert_eq!(G726_DQLN_40[1], 4030); // -66 in 12-bit TC
+        assert_eq!(G726_WI_32[0], 4084); // -12 in 12-bit TC
+        assert_eq!(G726_WI_40[15], 696);
+        assert_eq!(G726_FI_16[1], 7);
+        // Every DQLN value fits the 12-bit word; every F(I) fits 3 bits.
+        for &v in G726_DQLN_40
+            .iter()
+            .chain(&G726_DQLN_32)
+            .chain(&G726_DQLN_24)
+            .chain(&G726_DQLN_16)
+        {
+            assert!(v < 4096, "DQLN {v} exceeds the 12-bit word");
+        }
+        for &v in G726_FI_40
+            .iter()
+            .chain(&G726_FI_32)
+            .chain(&G726_FI_24)
+            .chain(&G726_FI_16)
+        {
+            assert!(v <= 7, "F(I) {v} exceeds 3 bits");
+        }
     }
 
     #[test]
