@@ -61,7 +61,11 @@ fuzz_target!(|data: &[u8]| {
     // decoder under the law picked by the selector byte. State updates
     // are law-independent, so this also cross-checks that the law path
     // consumes exactly one sample per code.
-    let law = if data[0] & 8 == 0 { Law::ALaw } else { Law::ULaw };
+    let law = if data[0] & 8 == 0 {
+        Law::ALaw
+    } else {
+        Law::ULaw
+    };
     let mut st3 = State::new(rate);
     let mut un3 = BitUnpacker::new(order);
     let mut codes = Vec::new();
