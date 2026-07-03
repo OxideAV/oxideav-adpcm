@@ -1,5 +1,7 @@
 # oxideav-adpcm
 
+[![CI](https://github.com/OxideAV/oxideav-adpcm/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-adpcm/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-adpcm.svg)](https://crates.io/crates/oxideav-adpcm) [![docs.rs](https://docs.rs/oxideav-adpcm/badge.svg)](https://docs.rs/oxideav-adpcm) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust decoder + encoder family for the common **ADPCM** (Adaptive
 Differential Pulse Code Modulation) audio formats found in WAV / AVI /
 QuickTime / VOX / FM-synth streams.
