@@ -16,7 +16,7 @@
 //! codec has no syntax to violate), so the assertions are exact.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_adpcm::g726::{decode_packet, BitOrder, BitUnpacker, Rate, State};
+use oxideav_adpcm::g726::{decode_packet, BitOrder, BitUnpacker, Law, Rate, State};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {
@@ -55,4 +55,17 @@ fuzz_target!(|data: &[u8]| {
     decode_packet(&payload[..split], &mut st2, &mut un2, &mut split_out);
     decode_packet(&payload[split..], &mut st2, &mut un2, &mut split_out);
     assert_eq!(whole, split_out, "packet split changed the decode");
+
+    // The G.711 log-PCM output chain (§4.2.8 COMPRESS + SYNC) has no
+    // partial domain either: run the same code stream through the law
+    // decoder under the law picked by the selector byte. State updates
+    // are law-independent, so this also cross-checks that the law path
+    // consumes exactly one sample per code.
+    let law = if data[0] & 8 == 0 { Law::ALaw } else { Law::ULaw };
+    let mut st3 = State::new(rate);
+    let mut un3 = BitUnpacker::new(order);
+    let mut codes = Vec::new();
+    un3.feed(payload, rate.bits(), &mut codes);
+    let law_out: Vec<u8> = codes.iter().map(|&c| st3.decode_law(c, law)).collect();
+    assert_eq!(law_out.len(), whole.len(), "law path sample count diverged");
 });

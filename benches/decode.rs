@@ -485,6 +485,40 @@ fn bench_decode_g726_1s(c: &mut Criterion, rate: g726::Rate, label: &str) {
     g.finish();
 }
 
+/// Law-interface variant of the 32 kbit/s scenario: the timed loop
+/// runs the §4.2.8 output chain (COMPRESS → re-EXPAND → LOG/SUBTB →
+/// SYNC) per sample on top of the linear decode, so the delta against
+/// `decode_g726_32kbit_mono_1s` prices the log-PCM interface.
+fn bench_decode_g726_32k_alaw_mono_1s(c: &mut Criterion) {
+    let rate = g726::Rate::R32;
+    let pcm = build_pcm(8_000, 0x0726_0000 ^ rate.bits() as u32);
+    let mut enc = g726::State::new(rate);
+    let mut pk = g726::BitPacker::new(g726::BitOrder::MsbFirst);
+    let mut bytes = g726::encode_packet(&pcm, &mut enc, &mut pk);
+    pk.flush(&mut bytes);
+
+    let mut g = c.benchmark_group("decode_g726_32kbit_alaw_mono_1s");
+    g.throughput(Throughput::Bytes(bytes.len() as u64));
+    g.bench_function(
+        BenchmarkId::from_parameter("g726/32kbit/alaw/mono/8000Hz/1s"),
+        |b| {
+            b.iter(|| {
+                let src = criterion::black_box(&bytes);
+                let mut st = g726::State::new(rate);
+                let mut un = g726::BitUnpacker::new(g726::BitOrder::MsbFirst);
+                let mut codes = Vec::with_capacity(8_000);
+                un.feed(src, rate.bits(), &mut codes);
+                let out: Vec<u8> = codes
+                    .into_iter()
+                    .map(|c| st.decode_law(c, g726::Law::ALaw))
+                    .collect();
+                criterion::black_box(out)
+            });
+        },
+    );
+    g.finish();
+}
+
 fn bench_decode_g726_16k_mono_1s(c: &mut Criterion) {
     bench_decode_g726_1s(c, g726::Rate::R16, "16kbit");
 }
@@ -519,5 +553,6 @@ criterion_group!(
     bench_decode_g726_24k_mono_1s,
     bench_decode_g726_32k_mono_1s,
     bench_decode_g726_40k_mono_1s,
+    bench_decode_g726_32k_alaw_mono_1s,
 );
 criterion_main!(benches);
