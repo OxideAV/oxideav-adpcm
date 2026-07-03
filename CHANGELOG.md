@@ -33,6 +33,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the EXPAND front-end equivalence and the no-panic domain of
   `decode_law`.
 
+- `adpcm_g726` registry `law` codec option (`linear` default / `alaw` /
+  `ulaw`): both factories switch onto the log-PCM interface — the
+  encoder compands each 16-bit sample to a law word before the §4.2.1
+  EXPAND front-end, the decoder runs the §4.2.8 COMPRESS + SYNC chain
+  and expands the adjusted law word back to 16-bit linear (the frames
+  sit on the G.711 lattice). The registry decoder reproduces the ITU
+  reset conformance vectors end to end through the packed wire format
+  (`tests/g726_registry.rs`); `g726::expand_i16` / `g726::compress_i16`
+  are public.
+
 - **ITU-T G.726 narrowband ADPCM** (`adpcm_g726`) — decoder + encoder
   for all four rates (40/32/24/16 kbit/s; 5/4/3/2 bits per sample) as a
   bit-exact transcription of Recommendation G.726 (12/1990) §4.2: the

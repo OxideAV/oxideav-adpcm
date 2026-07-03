@@ -640,6 +640,38 @@ pub(crate) fn parse_g726_order_option(
     }
 }
 
+/// Parse the `law` codec option into an optional [`g726::Law`].
+///
+/// Accepted only for [`Variant::G726`]: `"linear"` (default; the
+/// 16-bit linear PCM interface), `"alaw"` or `"ulaw"` (the
+/// Recommendation's G.711 log-PCM interface — §4.2.1 EXPAND on
+/// encode, the §4.2.8 COMPRESS + SYNC output chain on decode — with
+/// the law words carried as 16-bit linear frames on the law lattice).
+/// For any other variant a present option is rejected.
+pub(crate) fn parse_g726_law_option(
+    variant: Variant,
+    params: &CodecParameters,
+) -> Result<Option<g726::Law>> {
+    match params.options.get("law") {
+        None => Ok(None),
+        Some(v) => {
+            if variant != Variant::G726 {
+                return Err(Error::unsupported(format!(
+                    "adpcm: law option {v:?} is only valid for adpcm_g726, not {variant:?}"
+                )));
+            }
+            match v {
+                "linear" => Ok(None),
+                "alaw" => Ok(Some(g726::Law::ALaw)),
+                "ulaw" => Ok(Some(g726::Law::ULaw)),
+                other => Err(Error::unsupported(format!(
+                    "adpcm_g726: law option {other:?} not supported (linear, alaw or ulaw)"
+                ))),
+            }
+        }
+    }
+}
+
 pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     let variant = Variant::from_codec_id(&params.codec_id).ok_or_else(|| {
         Error::unsupported(format!(
@@ -783,6 +815,9 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // codes are identical; only the in-byte placement differs. Other
     // variants reject the option.
     let g726_order = parse_g726_order_option(variant, params)?;
+    // `law` codec option — G.726 log-PCM (A-law / µ-law) interface
+    // per §4.2.1 / §4.2.8; `None` keeps the linear interface.
+    let g726_law = parse_g726_law_option(variant, params)?;
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
         variant,
@@ -800,6 +835,7 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         g726_state: g726::State::new(g726_rate),
         g726_unpacker: g726::BitUnpacker::new(g726_order),
         g726_order,
+        g726_law,
         eof: false,
     }))
 }
@@ -856,6 +892,11 @@ pub struct AdpcmDecoder {
     g726_state: g726::State,
     g726_unpacker: g726::BitUnpacker,
     g726_order: g726::BitOrder,
+    // `Some` ⇒ the G.711 log-PCM interface: each code is decoded
+    // through the §4.2.8 COMPRESS + SYNC chain and the resulting law
+    // word expanded back to 16-bit linear (the output PCM sits on the
+    // law lattice). `None` ⇒ the linear interface.
+    g726_law: Option<g726::Law>,
     eof: bool,
 }
 
@@ -949,16 +990,30 @@ impl AdpcmDecoder {
                 self.dialogic_order,
                 dialogic::Output::Wide16,
             ),
-            Variant::G726 => {
-                let mut out = Vec::new();
-                g726::decode_packet(
-                    &pkt.data,
-                    &mut self.g726_state,
-                    &mut self.g726_unpacker,
-                    &mut out,
-                );
-                out
-            }
+            Variant::G726 => match self.g726_law {
+                None => {
+                    let mut out = Vec::new();
+                    g726::decode_packet(
+                        &pkt.data,
+                        &mut self.g726_state,
+                        &mut self.g726_unpacker,
+                        &mut out,
+                    );
+                    out
+                }
+                Some(law) => {
+                    // Log-PCM interface: §4.2.8 COMPRESS + SYNC per
+                    // code, then the law word expanded to 16-bit
+                    // linear (the PCM sits on the law lattice).
+                    let mut codes = Vec::new();
+                    self.g726_unpacker
+                        .feed(&pkt.data, self.g726_rate.bits(), &mut codes);
+                    codes
+                        .into_iter()
+                        .map(|c| g726::expand_i16(self.g726_state.decode_law(c, law), law))
+                        .collect()
+                }
+            },
         };
 
         // Interleaved i16 → little-endian bytes.

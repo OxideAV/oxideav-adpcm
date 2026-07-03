@@ -1383,6 +1383,10 @@ pub struct G726Encoder {
     output_params: CodecParameters,
     state: g726::State,
     packer: g726::BitPacker,
+    // `Some` ⇒ the G.711 log-PCM interface: input samples are
+    // companded to law words and encoded through the §4.2.1 EXPAND
+    // front-end. `None` ⇒ the linear interface.
+    law: Option<g726::Law>,
     pending: VecDeque<Packet>,
     samples_emitted: i64,
     flushed: bool,
@@ -1406,7 +1410,19 @@ impl Encoder for G726Encoder {
             return Ok(());
         }
         let n_samples = pcm.len() as i64;
-        let bytes = g726::encode_packet(&pcm, &mut self.state, &mut self.packer);
+        let bytes = match self.law {
+            None => g726::encode_packet(&pcm, &mut self.state, &mut self.packer),
+            Some(law) => {
+                let mut out =
+                    Vec::with_capacity((pcm.len() * self.state.rate().bits() as usize).div_ceil(8));
+                for &s in &pcm {
+                    let code = self.state.encode_law(g726::compress_i16(s, law), law);
+                    self.packer
+                        .push(code as u32, self.state.rate().bits(), &mut out);
+                }
+                out
+            }
+        };
         let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
         let pts = self.samples_emitted;
         self.samples_emitted += n_samples;
@@ -1617,10 +1633,17 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 })?;
             }
             let order = crate::decoder::parse_g726_order_option(crate::Variant::G726, params)?;
+            // `law` codec option — with `alaw` / `ulaw` the encoder
+            // speaks the Recommendation's G.711 log-PCM interface:
+            // each 16-bit sample is companded to a law word and fed
+            // through the §4.2.1 EXPAND front-end (mirrored by the
+            // decoder factory's COMPRESS + SYNC output chain).
+            let law = crate::decoder::parse_g726_law_option(crate::Variant::G726, params)?;
             Ok(Box::new(G726Encoder {
                 output_params: params.clone(),
                 state: g726::State::new(rate),
                 packer: g726::BitPacker::new(order),
+                law,
                 pending: VecDeque::new(),
                 samples_emitted: 0,
                 flushed: false,

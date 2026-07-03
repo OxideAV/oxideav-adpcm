@@ -136,10 +136,13 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   G.726-specific `bit_order` option picks the in-byte packing: `msb`
   (default — the network/RTP convention and the WAV `0x0045` framing
   produced by common tools) or `lsb`. Mono only. Two PCM interfaces:
-  the registry path speaks 16-bit linear mapped onto the spec's 14-bit
-  uniform words (`>> 2` in, clamp + `<< 2` out; standalone G.711
-  streams remain the `oxideav-g711` codec tags' domain), while the
-  direct API also implements the Recommendation's log-PCM interface —
+  by default the registry path speaks 16-bit linear mapped onto the
+  spec's 14-bit uniform words (`>> 2` in, clamp + `<< 2` out;
+  standalone G.711 streams remain the `oxideav-g711` codec tags'
+  domain), and the G.726-specific `law` option (`linear` default /
+  `alaw` / `ulaw`) switches both factories onto the Recommendation's
+  log-PCM interface with the law words carried as 16-bit linear frames
+  on the law lattice. The direct API exposes that interface fully —
   §4.2.1 EXPAND on the encoder side and the full §4.2.8 output chain
   (COMPRESS → re-EXPAND → re-quantization → SYNC synchronous coding
   adjustment, Tables 15-20) on the decoder side

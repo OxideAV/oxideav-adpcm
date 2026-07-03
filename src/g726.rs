@@ -742,6 +742,24 @@ pub fn compress(sr: u32, law: Law) -> u8 {
     }
 }
 
+/// [`expand`] to standard 16-bit PCM: the 14-bit uniform word scaled
+/// up (`<< 2`), matching the [`State::decode_i16`] convention.
+pub fn expand_i16(s: u8, law: Law) -> i16 {
+    let sl = expand(s, law);
+    let v = if sl >> 13 == 0 {
+        sl as i32
+    } else {
+        sl as i32 - 16384
+    };
+    (v << 2) as i16
+}
+
+/// [`compress`] from standard 16-bit PCM: scaled down (`>> 2`) onto
+/// the 14-bit uniform interface, matching [`State::encode_i16`].
+pub fn compress_i16(s: i16, law: Law) -> u8 {
+    compress(((s >> 2) as i32 as u32) & 0xFFFF, law)
+}
+
 /// `SP+` / `SP−` of the SYNC block: the PCM code word of the next more
 /// positive (`up = true`) or more negative output level, clamped at
 /// the extremes. Pinned by the Table 20/G.726 worked examples — in

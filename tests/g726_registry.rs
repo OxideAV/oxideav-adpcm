@@ -251,3 +251,115 @@ fn decoder_reset_reseeds_codec_state_and_bit_buffer() {
     let second = run(&mut dec);
     assert_eq!(first, second, "reset did not fully re-seed the decoder");
 }
+
+// ----- G.711 log-PCM (`law`) interface --------------------------------
+
+/// Load a conformance fixture (16-bit LE words, payload right-justified
+/// octets) from `tests/fixtures/g726/`.
+fn law_fixture(name: &str) -> Vec<u8> {
+    let mut p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    p.push("tests");
+    p.push("fixtures");
+    p.push("g726");
+    p.push(name);
+    let raw = std::fs::read(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()));
+    raw.chunks_exact(2)
+        .map(|w| {
+            assert_eq!(w[1], 0, "{name}: non-octet word");
+            w[0]
+        })
+        .collect()
+}
+
+/// The registry decoder with `law` set reproduces the official ITU
+/// Appendix II reset decoder vectors end to end: the per-word codes are
+/// packed into the wire format, streamed through `send_packet` /
+/// `receive_frame`, and the emitted 16-bit PCM must equal the expanded
+/// reference law words exactly, at every rate under both laws.
+#[test]
+fn registry_law_decode_reproduces_conformance_vectors() {
+    let reg = registry();
+    let tb = TimeBase::new(1, 8000);
+    for (bits, r) in [("2", "16"), ("3", "24"), ("4", "32"), ("5", "40")] {
+        for (law, l) in [(g726::Law::ALaw, "a"), (g726::Law::ULaw, "m")] {
+            let codes = law_fixture(&format!("rn{r}f{l}.i"));
+            let want: Vec<i16> = law_fixture(&format!("rn{r}f{l}.o"))
+                .iter()
+                .map(|&sp| g726::expand_i16(sp, law))
+                .collect();
+            let rate = g726::Rate::from_bits(bits.parse().unwrap()).unwrap();
+            let bytes = g726::pack_codes(&codes, rate, g726::BitOrder::MsbFirst);
+            let lawname = if l == "a" { "alaw" } else { "ulaw" };
+            let p = params(&[("bits_per_sample", bits), ("law", lawname)]);
+            let mut dec = reg.first_decoder(&p).expect("law decoder");
+            let mut got = Vec::new();
+            for chunk in bytes.chunks(509) {
+                dec.send_packet(&Packet::new(0, tb, chunk.to_vec()))
+                    .unwrap();
+                if let Ok(Frame::Audio(af)) = dec.receive_frame() {
+                    for pair in af.data[0].chunks_exact(2) {
+                        got.push(i16::from_le_bytes([pair[0], pair[1]]));
+                    }
+                }
+            }
+            assert_eq!(
+                &got[..want.len().min(got.len())],
+                &want[..want.len().min(got.len())],
+                "rn{r}f{l}: registry law decode diverged"
+            );
+            assert!(got.len() >= want.len(), "rn{r}f{l}: short decode");
+        }
+    }
+}
+
+/// Law-interface encode → decode round trip: the output PCM sits on
+/// the G.711 lattice (compress → expand idempotent on every emitted
+/// sample) and still clears the linear path's SNR floor.
+#[test]
+fn registry_law_round_trip_stays_on_law_lattice() {
+    let pcm = sine_pcm(4000, 700.0, 9000.0);
+    for lawname in ["alaw", "ulaw"] {
+        let law = if lawname == "alaw" {
+            g726::Law::ALaw
+        } else {
+            g726::Law::ULaw
+        };
+        let opts = [("bits_per_sample", "5"), ("law", lawname)];
+        let (_, decoded) = round_trip(&opts, &pcm, 160, 33);
+        assert!(decoded.len() >= pcm.len(), "{lawname}: short decode");
+        for (k, &s) in decoded.iter().enumerate() {
+            assert_eq!(
+                g726::expand_i16(g726::compress_i16(s, law), law),
+                s,
+                "{lawname}: sample {k} not on the law lattice"
+            );
+        }
+        let snr = snr_db(&pcm[500..], &decoded[500..pcm.len()]);
+        assert!(snr > 22.0, "{lawname}: SNR {snr:.1} dB below 22 dB");
+    }
+}
+
+/// `law` option validation: unknown values are rejected on both
+/// factories, `linear` is accepted as the explicit default, and the
+/// option is G.726-specific.
+#[test]
+fn law_option_validation() {
+    let reg = registry();
+    for bad in ["a-law", "mu", "pcm", ""] {
+        let p = params(&[("law", bad)]);
+        assert!(reg.first_decoder(&p).is_err(), "decoder accepted law={bad}");
+        assert!(reg.first_encoder(&p).is_err(), "encoder accepted law={bad}");
+    }
+    let p = params(&[("law", "linear")]);
+    assert!(reg.first_decoder(&p).is_ok(), "decoder rejected law=linear");
+    assert!(reg.first_encoder(&p).is_ok(), "encoder rejected law=linear");
+    // The option is G.726-specific: another variant must reject it.
+    let mut p = CodecParameters::audio(CodecId::new(oxideav_adpcm::CODEC_ID_YAMAHA));
+    p.sample_rate = Some(8000);
+    p.channels = Some(1);
+    p.options.insert("law", "alaw");
+    assert!(
+        reg.first_decoder(&p).is_err(),
+        "yamaha decoder accepted the G.726 law option"
+    );
+}
