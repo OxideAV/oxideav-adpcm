@@ -839,6 +839,59 @@ fn g726_registry_path_random_packets_match_one_shot_decode() {
     }
 }
 
+/// Law-domain front-end equivalence: `encode_law` is exactly
+/// `encode_step` composed with the §4.2.1 EXPAND conversion, for every
+/// possible law code word, at every rate, from a randomized state — so
+/// the log-PCM interface adds no arithmetic of its own on the encoder
+/// side.
+#[test]
+fn g726_encode_law_equals_expand_then_encode_step() {
+    let mut lcg = Lcg::new(0xD726_0004);
+    for &rate in g726::Rate::all() {
+        for law in [g726::Law::ALaw, g726::Law::ULaw] {
+            // Scramble both states identically first.
+            let mut a = g726::State::new(rate);
+            let mut b = g726::State::new(rate);
+            for _ in 0..257 {
+                let c = lcg.next_u8();
+                a.decode_step(c);
+                b.decode_step(c);
+            }
+            for s in 0..=255u8 {
+                let sl = g726::expand(s, law);
+                let sl14 = if sl >> 13 == 0 {
+                    sl as i16
+                } else {
+                    sl as i16 - 16384
+                };
+                assert_eq!(
+                    a.encode_law(s, law),
+                    b.encode_step(sl14),
+                    "{rate:?} {law:?}: law word {s:#04x}"
+                );
+            }
+        }
+    }
+}
+
+/// `decode_law` accepts every code word at every rate under both laws
+/// from arbitrary (pseudo-random-code-scrambled) states without
+/// panicking — the law output chain (COMPRESS → EXPAND → LOG → SUBTB →
+/// SYNC) has no partial domain on top of the linear decoder's.
+#[test]
+fn g726_decode_law_never_panics_on_random_codes() {
+    let mut lcg = Lcg::new(0xD726_0005);
+    for &rate in g726::Rate::all() {
+        for law in [g726::Law::ALaw, g726::Law::ULaw] {
+            let mut st = g726::State::new(rate);
+            for _ in 0..20_000 {
+                // Full byte: bits above the code width must be ignored.
+                let _ = st.decode_law(lcg.next_u8(), law);
+            }
+        }
+    }
+}
+
 // Silence unused-import warnings if the `decoder` module ever stops
 // re-exporting public items — currently nothing from `decoder` is used
 // directly, but we keep the import as a compile-time anchor so adding

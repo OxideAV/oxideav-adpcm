@@ -322,6 +322,41 @@ fn homing_decoder_cross_law_legs_all_rates() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Synchronous tandem transparency (§4.2.8 SYNC, exercised end to end)
+// ---------------------------------------------------------------------------
+
+/// The property the SYNC block exists for: re-encoding a decoder's
+/// log-PCM output through a second (synchronously started) G.726 stage
+/// reproduces the PCM exactly — tandem codings add no cumulative
+/// distortion. Driven with the *verified* first-stage conformance
+/// outputs (normal and overload, both laws, all rates) through two
+/// further stages.
+#[test]
+fn sync_tandem_stages_are_pcm_transparent_on_conformance_outputs() {
+    for (rate, r) in RATES {
+        for k in ["n", "v"] {
+            for (law, l) in [(Law::ALaw, "a"), (Law::ULaw, "m")] {
+                let stage1 = fixture(&format!("r{k}{r}f{l}.o"));
+                let mut prev = stage1.clone();
+                for stage in 2..=3 {
+                    let mut enc = State::new(rate);
+                    let mut dec = State::new(rate);
+                    let next: Vec<u8> = prev
+                        .iter()
+                        .map(|&sp| {
+                            let c = enc.encode_law(sp, law);
+                            dec.decode_law(c, law)
+                        })
+                        .collect();
+                    assert_words_eq(&next, &prev, &format!("r{k}{r}f{l}.o tandem stage {stage}"));
+                    prev = next;
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn homing_decoder_codeword_sweep_all_rates_both_laws() {
     for (rate, r) in RATES {
