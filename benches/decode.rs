@@ -29,7 +29,9 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use oxideav_adpcm::{dialogic, encoder as adpcm_encoder, ima_qt, ima_wav, ms, yamaha, yamaha_a};
+use oxideav_adpcm::{
+    dialogic, encoder as adpcm_encoder, g726, ima_qt, ima_wav, ms, yamaha, yamaha_a,
+};
 
 /// Deterministic xorshift32 — synthesises evenly-distributed sample
 /// values so per-block encoders exercise every adaptation rung and the
@@ -449,6 +451,56 @@ fn bench_decode_dialogic_stereo_1s_hifirst_wide16(c: &mut Criterion) {
     g.finish();
 }
 
+// ----------------------------------------------------------------------
+// ITU-T G.726 — stream-oriented at the bit level; one benched second is
+// 8000 samples at the fixed 8 kHz telephony rate.
+// ----------------------------------------------------------------------
+
+/// One G.726 decode scenario: 1 s of stream at `rate` (MSB-first
+/// packing), synthesised through the public encoder at setup time so
+/// the timed loop measures only the per-sample decode + bit unpack.
+fn bench_decode_g726_1s(c: &mut Criterion, rate: g726::Rate, label: &str) {
+    let pcm = build_pcm(8_000, 0x0726_0000 ^ rate.bits() as u32);
+    let mut enc = g726::State::new(rate);
+    let mut pk = g726::BitPacker::new(g726::BitOrder::MsbFirst);
+    let mut bytes = g726::encode_packet(&pcm, &mut enc, &mut pk);
+    pk.flush(&mut bytes);
+
+    let name = format!("decode_g726_{label}_mono_1s");
+    let mut g = c.benchmark_group(&name);
+    g.throughput(Throughput::Bytes(bytes.len() as u64));
+    g.bench_function(
+        BenchmarkId::from_parameter(format!("g726/{label}/mono/8000Hz/1s")),
+        |b| {
+            b.iter(|| {
+                let src = criterion::black_box(&bytes);
+                let mut st = g726::State::new(rate);
+                let mut un = g726::BitUnpacker::new(g726::BitOrder::MsbFirst);
+                let mut out = Vec::with_capacity(8_000);
+                g726::decode_packet(src, &mut st, &mut un, &mut out);
+                criterion::black_box(out)
+            });
+        },
+    );
+    g.finish();
+}
+
+fn bench_decode_g726_16k_mono_1s(c: &mut Criterion) {
+    bench_decode_g726_1s(c, g726::Rate::R16, "16kbit");
+}
+
+fn bench_decode_g726_24k_mono_1s(c: &mut Criterion) {
+    bench_decode_g726_1s(c, g726::Rate::R24, "24kbit");
+}
+
+fn bench_decode_g726_32k_mono_1s(c: &mut Criterion) {
+    bench_decode_g726_1s(c, g726::Rate::R32, "32kbit");
+}
+
+fn bench_decode_g726_40k_mono_1s(c: &mut Criterion) {
+    bench_decode_g726_1s(c, g726::Rate::R40, "40kbit");
+}
+
 criterion_group!(
     benches,
     bench_decode_ms_mono_256b_blocks_1s,
@@ -463,5 +515,9 @@ criterion_group!(
     bench_decode_dialogic_mono_1s_hifirst_wide16,
     bench_decode_dialogic_mono_1s_lofirst_native12,
     bench_decode_dialogic_stereo_1s_hifirst_wide16,
+    bench_decode_g726_16k_mono_1s,
+    bench_decode_g726_24k_mono_1s,
+    bench_decode_g726_32k_mono_1s,
+    bench_decode_g726_40k_mono_1s,
 );
 criterion_main!(benches);
