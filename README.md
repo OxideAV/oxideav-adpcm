@@ -14,13 +14,14 @@ QuickTime / VOX / FM-synth streams.
 | `adpcm_yamaha`    | Yamaha ADPCM-B / DELTA-T (Y8950/YM2608-B/YMZ280B/AICA) | WAV tag `0x0020` |
 | `adpcm_yamaha_a`  | Yamaha ADPCM-A (YM2608/YM2610 rhythm channels) | chip-internal; no WAV tag |
 | `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless) **and** WAV tag `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) |
+| `adpcm_g726`      | ITU-T G.726 narrowband ADPCM (40/32/24/16 kbit/s) | telephony / RTP; WAV tag `0x0040` (`WAVE_FORMAT_G721_ADPCM`, the 4-bit rate) |
 
-G.722 (WAV tag `0x0028`) and G.726 / G.723.1 / G.729 live in their own
-crates and are not re-implemented here.
+G.722 (WAV tag `0x0028`) and G.723.1 / G.729 live in their own crates
+and are not re-implemented here.
 
 ## Status
 
-**Decoders and encoders for all six codec ids.** Output is i16-LE PCM.
+**Decoders and encoders for all seven codec ids.** Output is i16-LE PCM.
 
 The block-oriented WAV encoders (MS, IMA-WAV, IMA-QT) use the
 decoder-loop search — each input sample evaluates all candidate nibbles
@@ -124,6 +125,24 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   RMS bounds under both nibble orders. Three or more channels are
   rejected on both the encode and decode paths.
 
+- **ITU-T G.726 (Rec. G.726, 12/1990)** — bit-exact §4.2 state machine
+  shared by encode and decode, all four rates (5/4/3/2 bits per sample =
+  40/32/24/16 kbit/s) selected via the `bits_per_sample` codec option
+  (default 4). The stream is headerless and **bit-continuous**: codec
+  state *and* partial code words carry across packet boundaries (3- and
+  5-bit codes straddle bytes), so the decoder holds a bit-level
+  unpacker and the encoder a bit-level packer whose sub-byte residue
+  crosses `send_frame` calls (`flush` emits the zero-padded tail). The
+  G.726-specific `bit_order` option picks the in-byte packing: `msb`
+  (default — the network/RTP convention and the WAV `0x0045` framing
+  produced by common tools) or `lsb`. Mono only; the Recommendation's
+  A-law/µ-law PCM interfaces and the §3.7 synchronous-coding adjustment
+  are out of scope (G.711 lives in its own crate) — the linear
+  interface maps 16-bit PCM onto the spec's 14-bit uniform words
+  (`>> 2` in, clamp + `<< 2` out). Direct API under `g726::`
+  (`State`, `Rate`, `BitOrder`, `BitPacker`/`BitUnpacker`,
+  `encode_packet`/`decode_packet`, `pack_codes`/`unpack_codes`).
+
 ### Typed variant accessor
 
 `oxideav_adpcm::Variant` is the dispatch enum re-exported at the crate
@@ -162,7 +181,7 @@ variant must update both surfaces in lockstep.
 ## Robustness
 
 `tests/decoder_fuzz.rs` and `tests/encoder_fuzz.rs` enumerate
-structured-malformation coverage across all six variants: out-of-spec
+structured-malformation coverage across all seven variants: out-of-spec
 predictor / step-index bytes, truncated-block prefixes, and
 pseudo-random byte streams through both the block-level and
 `Decoder` / `Encoder` trait paths — every input returns `Ok` or `Err`,
@@ -179,6 +198,17 @@ PCM dump. The `ima4` path has no WAV tag, so its fixture is a CAF
 container and the harness pulls the raw 34-byte `ima4` blocks straight
 out of the CAF `data` chunk before feeding the decoder. Fixtures are
 generated on demand and skipped when the validator binary is absent.
+
+`tests/g726_validate.rs` runs the G.726 conformance pair: the decode
+direction feeds the validator's own G.726-in-WAV output (tag `0x0045`,
+all four rates) to our decoder and cross-correlates > 0.97 against the
+validator's PCM; the encode direction wraps our bytes in a WAV whose
+`fmt ` geometry mirrors the validator's (including `nBlockAlign` = 3 / 5
+at the odd code widths so readers that packetize on block boundaries
+never split a code) and requires the validator's decode to correlate
+> 0.97 with the input. `tests/g726_registry.rs` covers the registry
+path: per-rate round trips under both bit orders, packetization
+invariance, option validation, tag routing and reset semantics.
 
 `tests/encode_validate.rs` runs the *opposite* direction — it proves our
 **encoder** emits spec-conformant bytes, not merely bytes our own decoder
@@ -205,8 +235,11 @@ harness under `fuzz/` exposes per-variant decode and encode targets:
 ## Benchmarks
 
 A Criterion harness at `benches/decode.rs` covers the per-block /
-per-packet decode hot path across all six variants (12 scenarios,
-including the Dialogic stereo nibble-interleave path). All
+per-packet decode hot path across all seven variants (16 scenarios,
+including the Dialogic stereo nibble-interleave path and the four
+G.726 rates — ~171 µs per decoded second at 8 kHz on the reference
+machine, so the per-sample state machine, not the code width,
+dominates). All
 inputs are synthesised in-bench from a deterministic seed — block
 variants build a valid buffer via the public encoder so the timed loop
 measures only the decoder. No fixtures are read.
@@ -243,6 +276,20 @@ constants (uncopyrightable facts).
   `delta = (step·mmm)/8 + step/16 = step·(2·mmm+1)/16`, so at the minimum
   step (16) the eight magnitude levels are the documented `{1,3,5,…,15}`
   ladder; encode and decode share the recurrence bit-for-bit.
+- **ITU-T G.726** — the complete §4.2 sub-block specification
+  (EXPAND-less linear interface, LOG/SUBTB/QUAN, RECONST/ADDA/ANTILOG,
+  FILTA-FILTE, FUNCTW/FUNCTF, LIMA-LIMD, FMULT/ACCUM/ADDB/ADDC,
+  FLOAT A/B, UPA1/UPA2/UPB/XOR/TONE/TRANS/TRIGA/TRIGB) from
+  Recommendation G.726 (12/1990), staged at
+  `docs/audio/adpcm/g726/T-REC-G.726-199012-I.pdf`, with the per-rate
+  RECONST / W(I) / F(I) tables cross-checked against the extracted
+  normative CSVs under `docs/audio/adpcm/g726/tables/`. `DQ` uses the
+  16-bit signed-magnitude form (Table 6 note b, mandatory at
+  40 kbit/s). The quantizer decision ladders (Tables 7-10) were
+  verified against the synchronous-coding `ID` tables (Tables 16-19).
+  The ITU Appendix II digital test sequences are not staged
+  (TIES-gated), so bit-exactness is pinned by construction (a hand
+  trace of the §4.2 arithmetic) plus black-box cross-validation.
 - **OKI / Dialogic VOX ADPCM** — 49-entry step table and 8-entry
   step-pointer adjustment from Dialogic Corporation's *Dialogic ADPCM
   Algorithm* application note (doc 00-1366-001, 1988). Headerless `.vox`

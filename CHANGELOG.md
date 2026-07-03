@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ITU-T G.726 narrowband ADPCM** (`adpcm_g726`) — decoder + encoder
+  for all four rates (40/32/24/16 kbit/s; 5/4/3/2 bits per sample) as a
+  bit-exact transcription of Recommendation G.726 (12/1990) §4.2: the
+  full sub-block set with the spec's masked integer arithmetic, one
+  state machine shared by encode and decode (the decoder reproduces the
+  encoder's reconstruction trajectory exactly), 16-bit signed-magnitude
+  `DQ` (Table 6 note b), and the Table 6 optional-reset seeds. The
+  per-rate RECONST / W(I) / F(I) tables live in `tables::G726_*`; the
+  quantizer decision ladders (Tables 7-10, verified against the
+  synchronous-coding Tables 16-19) sit next to the QUAN block.
+  Registry: mono only; `bits_per_sample` option (2/3/4/5, default 4 =
+  32 kbit/s) selects the rate and the G.726-specific `bit_order` option
+  (`msb` default / `lsb`) the in-byte packing; WAV tag `0x0040`
+  (`WAVE_FORMAT_G721_ADPCM`) routes to the decoder at its 4-bit
+  default. The stream is bit-continuous: `BitPacker` / `BitUnpacker`
+  carry partial code words across packet boundaries (3- and 5-bit codes
+  straddle bytes) and `Decoder::reset` / `Encoder::flush` handle the
+  residue. Direct API under `g726::` (`State`, `Rate`, `BitOrder`,
+  `encode_packet` / `decode_packet`, `pack_codes` / `unpack_codes`).
+  `Variant::G726` extends the whole typed accessor surface
+  (`from_wave_format_tag(0x0040)`, `Shape::StreamOriented`,
+  `max_channels = 1`).
+
+- G.726 conformance + robustness rigs: `tests/g726_validate.rs`
+  (opaque-validator cross-checks in both directions at every rate — the
+  validator's G.726-in-WAV decodes on our side > 0.97 correlation, our
+  bytes wrapped in validator-geometry WAVs decode on its side > 0.97),
+  `tests/g726_registry.rs` (per-rate round trips under both bit orders,
+  packetization invariance, option validation, tag routing, reset
+  re-seed), in-tree never-panic/invariant sweeps in
+  `tests/decoder_fuzz.rs` + `tests/encoder_fuzz.rs` (one sample per
+  whole code, split-invariant wire bytes, LIMB-rail DC convergence,
+  registry/direct byte equality), two coverage-guided cargo-fuzz
+  targets (`decode_packet_g726`, `encode_packet_g726`), and four
+  Criterion scenarios (~171 µs per decoded second at every rate).
+
 - `Variant::from_wave_format_tag(u16)` and `Variant::from_fourcc([u8;4])`
   — the reverse of `wave_format_tag()` / `fourcc()`. A WAV / AVI /
   QuickTime demuxer that has parsed a `WAVEFORMATEX::wFormatTag`
