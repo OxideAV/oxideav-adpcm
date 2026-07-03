@@ -5,7 +5,7 @@
 //! packet immediately and stores the decoded PCM in `pending`, then
 //! `receive_frame` emits exactly one `AudioFrame` and drops the buffer.
 
-use crate::{dialogic, ima_qt, ima_wav, ms, yamaha, yamaha_a};
+use crate::{dialogic, g726, ima_qt, ima_wav, ms, yamaha, yamaha_a};
 use oxideav_core::Decoder;
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, Result};
 
@@ -61,6 +61,7 @@ pub enum Variant {
     Yamaha,
     YamahaA,
     Dialogic,
+    G726,
 }
 
 /// On-wire framing shape of an ADPCM variant.
@@ -112,6 +113,7 @@ impl Variant {
             Variant::Yamaha,
             Variant::YamahaA,
             Variant::Dialogic,
+            Variant::G726,
         ]
     }
 
@@ -125,6 +127,7 @@ impl Variant {
             Variant::Yamaha => crate::CODEC_ID_YAMAHA,
             Variant::YamahaA => crate::CODEC_ID_YAMAHA_A,
             Variant::Dialogic => crate::CODEC_ID_DIALOGIC,
+            Variant::G726 => crate::CODEC_ID_G726,
         }
     }
 
@@ -138,6 +141,7 @@ impl Variant {
             crate::CODEC_ID_YAMAHA => Some(Self::Yamaha),
             crate::CODEC_ID_YAMAHA_A => Some(Self::YamahaA),
             crate::CODEC_ID_DIALOGIC => Some(Self::Dialogic),
+            crate::CODEC_ID_G726 => Some(Self::G726),
             _ => None,
         }
     }
@@ -153,6 +157,12 @@ impl Variant {
     ///   headerless form is the `.vox` file. The 4-bit WAV-OKI body is
     ///   the canonical VOX layout (two samples per byte, high nibble
     ///   first), so the registry decoder handles it unchanged.
+    /// - `G726` → `0x0040` (`WAVE_FORMAT_G721_ADPCM`) — the documented
+    ///   WAV assignment for the 32 kbit/s (4-bit) rate, whose bit-exact
+    ///   behaviour G.726 preserves (the 1990 Recommendation consolidates
+    ///   G.721). The staged `WAVE_FORMAT_*` catalogue carries no tag for
+    ///   the other three rates, so a demuxer resolving this tag should
+    ///   run the decoder at its 4-bit default.
     ///
     /// `None` for ADPCM-IMA-QT (QuickTime addresses it via a fourcc) and
     /// ADPCM-A (chip-internal — no WAV assignment).
@@ -162,6 +172,7 @@ impl Variant {
             Variant::ImaWav => Some(0x0011),
             Variant::Yamaha => Some(0x0020),
             Variant::Dialogic => Some(0x0010),
+            Variant::G726 => Some(0x0040),
             Variant::ImaQt | Variant::YamahaA => None,
         }
     }
@@ -181,13 +192,15 @@ impl Variant {
     /// This is the typed counterpart of the container's registry
     /// tag-resolution path: a WAV / AVI demuxer that has parsed the
     /// `fmt ` chunk's `wFormatTag` can map it straight to a [`Variant`]
-    /// without round-tripping through a [`CodecId`] string. Only the four
+    /// without round-tripping through a [`CodecId`] string. Only the five
     /// variants with a canonical WAV-format assignment resolve:
     ///
     /// - `0x0002` → `Variant::Ms` (`WAVE_FORMAT_ADPCM`).
     /// - `0x0010` → `Variant::Dialogic` (`WAVE_FORMAT_OKI_ADPCM`).
     /// - `0x0011` → `Variant::ImaWav` (`WAVE_FORMAT_DVI_ADPCM`).
     /// - `0x0020` → `Variant::Yamaha` (`WAVE_FORMAT_YAMAHA_ADPCM`).
+    /// - `0x0040` → `Variant::G726` (`WAVE_FORMAT_G721_ADPCM` — the
+    ///   32 kbit/s 4-bit rate; G.726 consolidates G.721).
     ///
     /// Every other `wFormatTag` — including tags that belong to *other*
     /// codec families (`0x0001` PCM, `0x0028` G.722, …) and the two
@@ -204,6 +217,7 @@ impl Variant {
             0x0010 => Some(Variant::Dialogic),
             0x0011 => Some(Variant::ImaWav),
             0x0020 => Some(Variant::Yamaha),
+            0x0040 => Some(Variant::G726),
             _ => None,
         }
     }
@@ -243,7 +257,9 @@ impl Variant {
     pub const fn shape(self) -> Shape {
         match self {
             Variant::Ms | Variant::ImaWav | Variant::ImaQt => Shape::BlockOriented,
-            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => Shape::StreamOriented,
+            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic | Variant::G726 => {
+                Shape::StreamOriented
+            }
         }
     }
 
@@ -268,6 +284,9 @@ impl Variant {
     /// - `Variant::Dialogic` → `Some(2)` — the VOX nibble interleave
     ///   convention (sample-level round-robin) is defined for mono and
     ///   stereo only.
+    /// - `Variant::G726` → `Some(1)` — Recommendation G.726 is a
+    ///   single-channel 8 kHz telephony codec; the headerless code
+    ///   stream has no channel interleave convention.
     pub const fn max_channels(self) -> Option<u16> {
         match self {
             Variant::Ms => Some(2),
@@ -276,6 +295,7 @@ impl Variant {
             Variant::Yamaha => None,
             Variant::YamahaA => Some(1),
             Variant::Dialogic => Some(2),
+            Variant::G726 => Some(1),
         }
     }
 
@@ -304,7 +324,7 @@ impl Variant {
             Variant::Ms => Some(7 * ch),
             Variant::ImaWav => Some(4 * ch),
             Variant::ImaQt => Some(2 * ch),
-            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
+            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic | Variant::G726 => None,
         }
     }
 
@@ -388,7 +408,7 @@ impl Variant {
                 }
                 Some(crate::ima_qt::QT_SAMPLES_PER_BLOCK)
             }
-            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
+            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic | Variant::G726 => None,
         }
     }
 
@@ -478,7 +498,7 @@ impl Variant {
                 }
                 Some(crate::ima_qt::QT_BLOCK_SIZE * ch)
             }
-            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
+            Variant::Yamaha | Variant::YamahaA | Variant::Dialogic | Variant::G726 => None,
         }
     }
 
@@ -524,7 +544,11 @@ impl Variant {
             Variant::ImaWav => Some(spb_u16.to_le_bytes().to_vec()),
             // QuickTime ima4 lives in an ISO-BMFF sample entry, not a WAV
             // fmt extension; stream variants carry no block header.
-            Variant::ImaQt | Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => None,
+            Variant::ImaQt
+            | Variant::Yamaha
+            | Variant::YamahaA
+            | Variant::Dialogic
+            | Variant::G726 => None,
         }
     }
 }
@@ -586,6 +610,36 @@ pub(crate) fn parse_dialogic_order_option(
     }
 }
 
+/// Parse the `bit_order` codec option into a [`g726::BitOrder`].
+///
+/// Accepted only for [`Variant::G726`]: `"msb"` (default; each code
+/// packed from the byte's most-significant end — the network / RTP
+/// convention) or `"lsb"` (least-significant end first). Absent ⇒
+/// `BitOrder::MsbFirst`. For any other variant a present option is
+/// rejected.
+pub(crate) fn parse_g726_order_option(
+    variant: Variant,
+    params: &CodecParameters,
+) -> Result<g726::BitOrder> {
+    match params.options.get("bit_order") {
+        None => Ok(g726::BitOrder::MsbFirst),
+        Some(v) => {
+            if variant != Variant::G726 {
+                return Err(Error::unsupported(format!(
+                    "adpcm: bit_order option {v:?} is only valid for adpcm_g726, not {variant:?}"
+                )));
+            }
+            match v {
+                "msb" => Ok(g726::BitOrder::MsbFirst),
+                "lsb" => Ok(g726::BitOrder::LsbFirst),
+                other => Err(Error::unsupported(format!(
+                    "adpcm_g726: bit_order option {other:?} not supported (msb or lsb)"
+                ))),
+            }
+        }
+    }
+}
+
 pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     let variant = Variant::from_codec_id(&params.codec_id).ok_or_else(|| {
         Error::unsupported(format!(
@@ -635,11 +689,25 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         Variant::Dialogic => {
             dialogic::validate_channels(channels)?;
         }
+        Variant::G726 => {
+            // Recommendation G.726 is a single-channel 8 kHz telephony
+            // codec; the headerless code stream defines no channel
+            // interleave.
+            if channels != 1 {
+                return Err(Error::unsupported(format!(
+                    "adpcm_g726: only mono supported (got {channels} channels)"
+                )));
+            }
+        }
     }
     // `bits_per_sample` codec option — IMA-WAV (tag 0x0011) defines both
-    // 4-bit (default) and 3-bit coding via WAVEFORMATEX::wBitsPerSample.
-    // Other variants have a fixed code width and reject overrides.
+    // 4-bit (default) and 3-bit coding via WAVEFORMATEX::wBitsPerSample,
+    // and G.726 selects its operating rate by code width (2/3/4/5 bits =
+    // 16/24/32/40 kbit/s; 4-bit / 32 kbit/s is the default and the
+    // WAV-tag-0x0040 convention). Other variants have a fixed code width
+    // and reject overrides.
     let mut ima_bits: u8 = 4;
+    let mut g726_rate = g726::Rate::R32;
     if let Some(v) = params.options.get("bits_per_sample") {
         let bits: u8 = v.parse().map_err(|_| {
             Error::invalid(format!(
@@ -651,6 +719,14 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
             (Variant::ImaWav, other) => {
                 return Err(Error::unsupported(format!(
                     "adpcm_ima_wav: bits_per_sample {other} not supported (3 or 4)"
+                )));
+            }
+            (Variant::G726, 2..=5) => {
+                g726_rate = g726::Rate::from_bits(bits).expect("2..=5 maps to a rate");
+            }
+            (Variant::G726, other) => {
+                return Err(Error::unsupported(format!(
+                    "adpcm_g726: bits_per_sample {other} not supported (2, 3, 4 or 5)"
                 )));
             }
             (_, 4) => {} // every other variant is natively 4-bit
@@ -701,6 +777,12 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // first sample). The arithmetic is identical; only the unpack order
     // differs. Other variants reject the option.
     let dialogic_order = parse_dialogic_order_option(variant, params)?;
+    // `bit_order` codec option — G.726 streams are packed either from
+    // the byte's most-significant end (`msb`, default — the network /
+    // RTP convention) or from the least-significant end (`lsb`). The
+    // codes are identical; only the in-byte placement differs. Other
+    // variants reject the option.
+    let g726_order = parse_g726_order_option(variant, params)?;
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
         variant,
@@ -714,6 +796,10 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         yamaha_state: vec![yamaha::Channel::for_chip(yamaha_chip); channels as usize],
         yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
         dialogic_state: vec![dialogic::Channel::default(); channels as usize],
+        g726_rate,
+        g726_state: g726::State::new(g726_rate),
+        g726_unpacker: g726::BitUnpacker::new(g726_order),
+        g726_order,
         eof: false,
     }))
 }
@@ -762,6 +848,14 @@ pub struct AdpcmDecoder {
     // Dialogic / OKI VOX is also stream-oriented (state persists across
     // packets — no per-block resets).
     dialogic_state: Vec<dialogic::Channel>,
+    // G.726 is stream-oriented at the *bit* level: codec state carries
+    // across packets and, at the 3- and 5-bit rates, so does a partial
+    // code word (the unpacker's residual bits). The rate and in-byte
+    // order are retained so `reset` re-seeds with the same options.
+    g726_rate: g726::Rate,
+    g726_state: g726::State,
+    g726_unpacker: g726::BitUnpacker,
+    g726_order: g726::BitOrder,
     eof: bool,
 }
 
@@ -855,6 +949,16 @@ impl AdpcmDecoder {
                 self.dialogic_order,
                 dialogic::Output::Wide16,
             ),
+            Variant::G726 => {
+                let mut out = Vec::new();
+                g726::decode_packet(
+                    &pkt.data,
+                    &mut self.g726_state,
+                    &mut self.g726_unpacker,
+                    &mut out,
+                );
+                out
+            }
         };
 
         // Interleaved i16 → little-endian bytes.
@@ -926,6 +1030,8 @@ impl Decoder for AdpcmDecoder {
         for st in &mut self.dialogic_state {
             *st = dialogic::Channel::default();
         }
+        self.g726_state = g726::State::new(self.g726_rate);
+        self.g726_unpacker = g726::BitUnpacker::new(self.g726_order);
         Ok(())
     }
 }

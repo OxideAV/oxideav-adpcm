@@ -1136,8 +1136,9 @@ mod tests {
         // WAn partial products carry one extra fractional bit — ACCUM
         // restores Q0 with its final `>> 1` — so multiplying 1.0 by a
         // float word yields 2× the word's linear magnitude, to within
-        // the 6-bit mantissa truncation.
-        for v in [1u32, 5, 63, 64, 100, 1000, 8191, 16383] {
+        // the 6-bit mantissa truncation, as long as the doubled value
+        // still fits the 15-bit product magnitude (v <= 8191 here).
+        for v in [1u32, 5, 63, 64, 100, 1000, 4095, 8191] {
             let f = floatb(v);
             let w = fmult(16384, f);
             assert_eq!(w >> 15, 0, "sign flipped for v={v}");
@@ -1148,6 +1149,11 @@ mod tests {
             let tol = ((2 * v as i64) >> 4).max(8);
             assert!(err <= tol, "v={v}: fmult(1.0, float(v))={w}, err {err}");
         }
+        // Beyond that range the spec's WAnEXP > 26 branch wraps the
+        // product magnitude modulo 2^15 rather than saturating — pin
+        // the documented wraparound: 2·16383 ≡ 256 with the mantissa
+        // rounding folded in.
+        assert_eq!(fmult(16384, floatb(16383)), 256, "WAnEXP > 26 wrap");
     }
 
     #[test]

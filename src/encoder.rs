@@ -59,6 +59,7 @@
 use std::collections::VecDeque;
 
 use crate::dialogic;
+use crate::g726;
 use crate::tables::{
     IMA3_INDEX_ADJUST, IMA_INDEX_ADJUST, IMA_STEP_SIZE, MS_ADAPTATION, MS_ADAPT_COEFF1,
     MS_ADAPT_COEFF2,
@@ -1362,6 +1363,87 @@ impl Encoder for YamahaAEncoder {
 }
 
 // ---------------------------------------------------------------------------
+// G.726 encoder
+// ---------------------------------------------------------------------------
+
+/// Stream-oriented ITU-T **G.726** encoder (`adpcm_g726`).
+///
+/// Single-channel 8 kHz narrowband ADPCM at 40 / 32 / 24 / 16 kbit/s
+/// (5/4/3/2 bits per sample, the `bits_per_sample` codec option; 4-bit
+/// 32 kbit/s default). The per-sample analysis embeds the full decoder
+/// state machine (Rec. G.726 §4.2), so the emitted codes decode
+/// bit-exactly back to the encoder's own reconstruction trajectory.
+///
+/// The code stream is packed per the `bit_order` codec option (`msb`
+/// default / `lsb`). At the 3- and 5-bit rates a code word straddles
+/// byte boundaries, so the packer carries residual bits across
+/// `send_frame` calls; `flush` zero-pads and emits the final partial
+/// byte.
+pub struct G726Encoder {
+    output_params: CodecParameters,
+    state: g726::State,
+    packer: g726::BitPacker,
+    pending: VecDeque<Packet>,
+    samples_emitted: i64,
+    flushed: bool,
+}
+
+impl Encoder for G726Encoder {
+    fn codec_id(&self) -> &CodecId {
+        &self.output_params.codec_id
+    }
+    fn output_params(&self) -> &CodecParameters {
+        &self.output_params
+    }
+    fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        let af = match frame {
+            Frame::Audio(a) => a,
+            _ => return Err(Error::invalid("adpcm_g726 encoder: expected audio frame")),
+        };
+        let mut pcm: Vec<i16> = Vec::new();
+        push_audio_frame_pcm(&mut pcm, af, 1)?;
+        if pcm.is_empty() {
+            return Ok(());
+        }
+        let n_samples = pcm.len() as i64;
+        let bytes = g726::encode_packet(&pcm, &mut self.state, &mut self.packer);
+        let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
+        let pts = self.samples_emitted;
+        self.samples_emitted += n_samples;
+        // At sub-byte rates a short frame may complete no whole byte —
+        // the codes stay buffered in the packer and ride out with the
+        // next frame (or `flush`), so no empty packet is emitted.
+        if !bytes.is_empty() {
+            self.pending
+                .push_back(Packet::new(0, tb, bytes).with_pts(pts));
+        }
+        Ok(())
+    }
+    fn receive_packet(&mut self) -> Result<Packet> {
+        if let Some(p) = self.pending.pop_front() {
+            return Ok(p);
+        }
+        if self.flushed {
+            return Err(Error::Eof);
+        }
+        Err(Error::NeedMore)
+    }
+    fn flush(&mut self) -> Result<()> {
+        // Zero-pad and emit any residual sub-byte bits as a final
+        // one-byte packet.
+        let mut tail = Vec::new();
+        self.packer.flush(&mut tail);
+        if !tail.is_empty() {
+            let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
+            self.pending
+                .push_back(Packet::new(0, tb, tail).with_pts(self.samples_emitted));
+        }
+        self.flushed = true;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers + factories
 // ---------------------------------------------------------------------------
 
@@ -1508,6 +1590,40 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 order,
                 pending: VecDeque::new(),
                 samples_emitted: 0,
+            }))
+        }
+        crate::CODEC_ID_G726 => {
+            if channels != 1 {
+                return Err(Error::unsupported(format!(
+                    "adpcm_g726 encoder: only mono supported (got {channels} channels)"
+                )));
+            }
+            // `bits_per_sample` codec option selects the operating rate
+            // (2/3/4/5 bits = 16/24/32/40 kbit/s; default 4 = 32 kbit/s),
+            // `bit_order` the in-byte packing (msb default / lsb) — both
+            // mirrored by the decoder factory so an encode -> decode pair
+            // built from the same CodecParameters always matches.
+            let mut rate = g726::Rate::R32;
+            if let Some(v) = params.options.get("bits_per_sample") {
+                let bits: u8 = v.parse().map_err(|_| {
+                    Error::invalid(format!(
+                        "adpcm_g726 encoder: bits_per_sample option {v:?} is not a number"
+                    ))
+                })?;
+                rate = g726::Rate::from_bits(bits).ok_or_else(|| {
+                    Error::unsupported(format!(
+                        "adpcm_g726 encoder: bits_per_sample {bits} not supported (2, 3, 4 or 5)"
+                    ))
+                })?;
+            }
+            let order = crate::decoder::parse_g726_order_option(crate::Variant::G726, params)?;
+            Ok(Box::new(G726Encoder {
+                output_params: params.clone(),
+                state: g726::State::new(rate),
+                packer: g726::BitPacker::new(order),
+                pending: VecDeque::new(),
+                samples_emitted: 0,
+                flushed: false,
             }))
         }
         other => Err(Error::unsupported(format!(

@@ -14,9 +14,12 @@
 //!   canonical WAV tag (chip-internal format).
 //! - **`adpcm_dialogic`** — OKI / Dialogic ADPCM (`.vox`); headerless,
 //!   no canonical WAV tag (rate supplied out of band).
+//! - **`adpcm_g726`** — ITU-T G.726 narrowband ADPCM at 40 / 32 / 24 /
+//!   16 kbit/s (5/4/3/2 bits per sample; 32 kbit/s default, WAV tag
+//!   `0x0040` = `WAVE_FORMAT_G721_ADPCM` for the 4-bit rate).
 //!
-//! G.722 / G.726 / G.729 are *not* handled here — they live in their own
-//! crates.
+//! G.722 / G.723.1 / G.729 are *not* handled here — they live in their
+//! own crates.
 //!
 //! # Registration
 //!
@@ -92,10 +95,21 @@ pub const CODEC_ID_YAMAHA_A: &str = "adpcm_yamaha_a";
 /// layout (two samples per byte, high nibble first), so the existing
 /// decode path is byte-identical.
 pub const CODEC_ID_DIALOGIC: &str = "adpcm_dialogic";
+/// Canonical codec id for ITU-T **G.726** narrowband ADPCM
+/// (40 / 32 / 24 / 16 kbit/s; Recommendation G.726, 12/1990).
+///
+/// Single-channel 8 kHz telephony codec; the operating rate is selected
+/// by the `bits_per_sample` codec option (2/3/4/5; default 4 =
+/// 32 kbit/s — the rate whose bit-exact behaviour matches the older
+/// G.721, hence the `WAVE_FORMAT_G721_ADPCM` = `0x0040` tag routing).
+/// The `bit_order` option picks the in-byte code packing (`msb` default
+/// / `lsb`). The stream is headerless and bit-continuous: codec state
+/// *and* partial code words carry across packet boundaries.
+pub const CODEC_ID_G726: &str = "adpcm_g726";
 
 /// Register every ADPCM variant with `reg`. Decoders **and** encoders
-/// for all six variants (MS-ADPCM, IMA-ADPCM-WAV, IMA-ADPCM-QT,
-/// Yamaha-ADPCM-B, Yamaha-ADPCM-A, OKI/Dialogic VOX).
+/// for all seven variants (MS-ADPCM, IMA-ADPCM-WAV, IMA-ADPCM-QT,
+/// Yamaha-ADPCM-B, Yamaha-ADPCM-A, OKI/Dialogic VOX, ITU-T G.726).
 pub fn register_codecs(reg: &mut CodecRegistry) {
     // adpcm_ms — WAVE_FORMAT_ADPCM = 0x0002.
     reg.register(
@@ -175,6 +189,22 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .encoder(encoder::make_encoder)
             .tag(CodecTag::wave_format(0x0010)),
     );
+    // adpcm_g726 — ITU-T G.726 (Rec. G.726, 12/1990). The documented
+    // WAV assignment is WAVE_FORMAT_G721_ADPCM = 0x0040 (the 4-bit
+    // 32 kbit/s rate — G.726 consolidates G.721, so the tag routes a
+    // WAV demuxer to this decoder at its 4-bit default). The other
+    // three rates are reached via the `bits_per_sample` codec option.
+    reg.register(
+        CodecInfo::new(CodecId::new(CODEC_ID_G726))
+            .capabilities(
+                CodecCapabilities::audio("adpcm_g726_sw")
+                    .with_lossy(true)
+                    .with_intra_only(false),
+            )
+            .decoder(decoder::make_decoder)
+            .encoder(encoder::make_encoder)
+            .tag(CodecTag::wave_format(0x0040)),
+    );
 }
 
 /// Unified registration entry point — installs every ADPCM variant
@@ -202,6 +232,7 @@ mod tests {
             CODEC_ID_YAMAHA,
             CODEC_ID_YAMAHA_A,
             CODEC_ID_DIALOGIC,
+            CODEC_ID_G726,
         ] {
             assert!(
                 reg.has_decoder(&CodecId::new(id)),
@@ -221,6 +252,7 @@ mod tests {
             CODEC_ID_YAMAHA,
             CODEC_ID_YAMAHA_A,
             CODEC_ID_DIALOGIC,
+            CODEC_ID_G726,
         ] {
             let mut p = CodecParameters::audio(CodecId::new(id));
             p.sample_rate = Some(22_050);
@@ -266,13 +298,14 @@ mod tests {
             CODEC_ID_YAMAHA,
             CODEC_ID_YAMAHA_A,
             CODEC_ID_DIALOGIC,
+            CODEC_ID_G726,
         ] {
             assert!(
                 from_all.contains(&id),
                 "codec id {id} missing from Variant::all()"
             );
         }
-        assert_eq!(from_all.len(), 6, "Variant::all() drifted from 6 entries");
+        assert_eq!(from_all.len(), 7, "Variant::all() drifted from 7 entries");
     }
 
     #[test]
@@ -285,6 +318,7 @@ mod tests {
                 Some(0x0011) => assert_eq!(v, Variant::ImaWav),
                 Some(0x0020) => assert_eq!(v, Variant::Yamaha),
                 Some(0x0010) => assert_eq!(v, Variant::Dialogic),
+                Some(0x0040) => assert_eq!(v, Variant::G726),
                 Some(other) => panic!("unexpected wave_format_tag {other:#06x} on {v:?}"),
                 None => assert!(
                     matches!(v, Variant::ImaQt | Variant::YamahaA),
@@ -372,8 +406,11 @@ mod tests {
             0x0006,    // A-law
             0x0007,    // mu-law
             0x0028,    // G.722 (its own crate)
-            0x0045,    // G.726 (its own crate)
-            0xFFFF,    // WAVE_FORMAT_EXTENSIBLE / sentinel
+            0x0045,    // not in the staged WAVE_FORMAT_* catalogue — the
+            // only documented G.726-family tag is 0x0040
+            // (WAVE_FORMAT_G721_ADPCM), which Variant::G726
+            // owns; 0x0045 stays unclaimed
+            0xFFFF, // WAVE_FORMAT_EXTENSIBLE / sentinel
         ] {
             assert_eq!(
                 Variant::from_wave_format_tag(tag),
@@ -411,8 +448,8 @@ mod tests {
     #[test]
     fn variant_shape_partitions_block_vs_stream() {
         // Three block-oriented (WAV/AVI/QT — per-block header re-seed)
-        // and three stream-oriented (Yamaha-A/B + Dialogic VOX —
-        // headerless, predictor + step carry across packets) variants.
+        // and four stream-oriented (Yamaha-A/B + Dialogic VOX + G.726 —
+        // headerless, codec state carries across packets) variants.
         for &v in Variant::all() {
             let shape = v.shape();
             match v {
@@ -424,11 +461,11 @@ mod tests {
                         v
                     );
                 }
-                Variant::Yamaha | Variant::YamahaA | Variant::Dialogic => {
+                Variant::Yamaha | Variant::YamahaA | Variant::Dialogic | Variant::G726 => {
                     assert_eq!(
                         shape,
                         Shape::StreamOriented,
-                        "{:?} is a stream-oriented chip variant",
+                        "{:?} is a stream-oriented chip / telephony variant",
                         v
                     );
                 }
@@ -446,8 +483,8 @@ mod tests {
             .count();
         assert_eq!(block, 3, "expected 3 block-oriented variants, got {block}");
         assert_eq!(
-            stream, 3,
-            "expected 3 stream-oriented variants, got {stream}"
+            stream, 4,
+            "expected 4 stream-oriented variants, got {stream}"
         );
     }
 
@@ -614,7 +651,12 @@ mod tests {
     fn variant_samples_per_block_rejects_bad_inputs() {
         // Stream-oriented variants always return None — no block framing
         // exists for Yamaha-A / Yamaha-B / Dialogic.
-        for &v in &[Variant::Yamaha, Variant::YamahaA, Variant::Dialogic] {
+        for &v in &[
+            Variant::Yamaha,
+            Variant::YamahaA,
+            Variant::Dialogic,
+            Variant::G726,
+        ] {
             assert_eq!(v.samples_per_block(1, 0), None, "{:?}: must be None", v);
             assert_eq!(v.samples_per_block(1, 256), None, "{:?}: must be None", v);
         }
@@ -727,7 +769,12 @@ mod tests {
     #[test]
     fn variant_block_size_bytes_rejects_bad_inputs() {
         // Stream-oriented variants have no block framing — always None.
-        for &v in &[Variant::Yamaha, Variant::YamahaA, Variant::Dialogic] {
+        for &v in &[
+            Variant::Yamaha,
+            Variant::YamahaA,
+            Variant::Dialogic,
+            Variant::G726,
+        ] {
             assert_eq!(v.block_size_bytes(1, 64), None, "{:?}: must be None", v);
             assert_eq!(v.block_size_bytes(1, 0), None, "{:?}: must be None", v);
         }
@@ -808,6 +855,7 @@ mod tests {
             Variant::Yamaha,
             Variant::YamahaA,
             Variant::Dialogic,
+            Variant::G726,
         ] {
             assert_eq!(
                 v.build_wave_format_extra(1, 256),
@@ -835,6 +883,7 @@ mod tests {
             CODEC_ID_YAMAHA,
             CODEC_ID_YAMAHA_A,
             CODEC_ID_DIALOGIC,
+            CODEC_ID_G726,
         ] {
             assert!(
                 ctx.codecs.has_decoder(&CodecId::new(id)),
