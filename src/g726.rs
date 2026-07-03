@@ -663,6 +663,32 @@ impl State {
         self.rate
     }
 
+    /// Switch the operating rate at a sample boundary, **carrying the
+    /// codec state over**.
+    ///
+    /// §4 of the Recommendation defines the four rates over one shared
+    /// state machine — only the quantizer codebook, the `W(I)` scale
+    /// multipliers and the `F(I)` speed-control function are
+    /// rate-scoped, and every Table 6 delayed variable is
+    /// rate-independent (this implementation uses the 16-bit
+    /// signed-magnitude `DQ` form at every rate, so no representation
+    /// changes either). Appendix I.1 relies on exactly this property:
+    /// DCME equipment alternates 32 kbit/s with 24/16 kbit/s coding
+    /// sample-by-sample to hit a fractional average rate, without
+    /// resetting the predictor. An encoder/decoder pair that switches
+    /// rates on the same sample schedule stays in exact lockstep.
+    pub fn set_rate(&mut self, rate: Rate) {
+        self.rate = rate;
+    }
+
+    /// Apply the optional reset input `R = 1` (Table 5/G.726): force
+    /// every delayed variable to its specified condition (the Table 6
+    /// reset column) so the codec enters a known state. The operating
+    /// rate is retained.
+    pub fn reset(&mut self) {
+        *self = State::new(self.rate);
+    }
+
     /// FMULT × 8 + ACCUM (§4.2.6): signal estimate `SE` and partial
     /// (sixth-order) estimate `SEZ`, both 15-bit TC.
     fn predict(&self) -> (u32, u32) {
@@ -1314,6 +1340,112 @@ mod tests {
         for ((rate, snr), (frate, fl)) in snrs.iter().zip(floor) {
             assert_eq!(*rate, frate);
             assert!(snr > &fl, "{rate:?}: SNR {snr:.1} dB below {fl} dB floor");
+        }
+    }
+
+    #[test]
+    fn set_rate_lockstep_encoder_decoder_stay_exact_across_switches() {
+        // Appendix I.1 rate alternation: an encoder/decoder pair that
+        // switches rates on the same sample schedule keeps identical
+        // state — the Table 6 variables are rate-independent, so a
+        // mid-stream switch must not disturb exact tracking.
+        let schedule = [
+            (Rate::R32, 400usize),
+            (Rate::R16, 400),
+            (Rate::R32, 400),
+            (Rate::R24, 400),
+            (Rate::R40, 400),
+            (Rate::R16, 400),
+        ];
+        let mut enc = State::new(Rate::R32);
+        let mut dec = State::new(Rate::R32);
+        let mut k = 0usize;
+        for &(rate, n) in &schedule {
+            enc.set_rate(rate);
+            dec.set_rate(rate);
+            for _ in 0..n {
+                let t = k as f64 / 8000.0;
+                let s = (7000.0
+                    * (0.4 + 0.6 * (std::f64::consts::PI * t * 3.0).sin().abs())
+                    * (2.0 * std::f64::consts::PI * 520.0 * t).sin())
+                    as i16;
+                let code = enc.encode_i16(s);
+                let _ = dec.decode_i16(code);
+                assert_eq!(enc.yl, dec.yl, "{rate:?} k={k}: yl diverged");
+                assert_eq!(enc.yu, dec.yu, "{rate:?} k={k}: yu diverged");
+                assert_eq!(enc.a1, dec.a1, "{rate:?} k={k}: a1 diverged");
+                assert_eq!(enc.a2, dec.a2, "{rate:?} k={k}: a2 diverged");
+                assert_eq!(enc.b, dec.b, "{rate:?} k={k}: b diverged");
+                assert_eq!(enc.dq, dec.dq, "{rate:?} k={k}: dq diverged");
+                assert_eq!(enc.sr, dec.sr, "{rate:?} k={k}: sr diverged");
+                k += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn set_rate_alternation_beats_the_lower_pure_rate() {
+        // The DCME 32k/24k alternation of Appendix I.1 should land
+        // between the two pure rates in quality — assert it at least
+        // clears the pure-24k floor on a tonal signal.
+        let pcm: Vec<i16> = (0..4000)
+            .map(|k| {
+                (8000.0 * (2.0 * std::f64::consts::PI * 700.0 * k as f64 / 8000.0).sin()) as i16
+            })
+            .collect();
+        let run = |rates: &dyn Fn(usize) -> Rate| -> f64 {
+            let mut enc = State::new(rates(0));
+            let mut dec = State::new(rates(0));
+            let decoded: Vec<i16> = pcm
+                .iter()
+                .enumerate()
+                .map(|(k, &s)| {
+                    enc.set_rate(rates(k));
+                    dec.set_rate(rates(k));
+                    let c = enc.encode_i16(s);
+                    dec.decode_i16(c)
+                })
+                .collect();
+            snr_db(&pcm[500..], &decoded[500..])
+        };
+        let pure24 = run(&|_| Rate::R24);
+        let pure32 = run(&|_| Rate::R32);
+        // Alternate 32/24 per sample (≈3.5 bits/sample average).
+        let alt = run(&|k| if k % 2 == 0 { Rate::R32 } else { Rate::R24 });
+        assert!(
+            alt > pure24,
+            "32/24 alternation ({alt:.1} dB) below pure 24k ({pure24:.1} dB)"
+        );
+        assert!(
+            alt < pure32 + 1.0,
+            "32/24 alternation ({alt:.1} dB) implausibly above pure 32k ({pure32:.1} dB)"
+        );
+    }
+
+    #[test]
+    fn reset_restores_table6_state_and_keeps_rate() {
+        let mut st = State::new(Rate::R40);
+        for k in 0..500 {
+            let _ = st.encode_i16(((k * 37) % 12000) as i16 - 6000);
+        }
+        assert_ne!(st.yu, 544, "state should have adapted before reset");
+        st.reset();
+        let fresh = State::new(Rate::R40);
+        assert_eq!(st.rate(), Rate::R40);
+        assert_eq!(st.yl, fresh.yl);
+        assert_eq!(st.yu, fresh.yu);
+        assert_eq!(st.dms, fresh.dms);
+        assert_eq!(st.dml, fresh.dml);
+        assert_eq!(st.ap, fresh.ap);
+        assert_eq!(st.a1, fresh.a1);
+        assert_eq!(st.a2, fresh.a2);
+        assert_eq!(st.b, fresh.b);
+        assert_eq!(st.dq, fresh.dq);
+        assert_eq!(st.sr, fresh.sr);
+        // And the stream restarts deterministically.
+        let mut reference = State::new(Rate::R40);
+        for s in [100i16, -350, 4000, -8000, 12345] {
+            assert_eq!(st.encode_i16(s), reference.encode_i16(s));
         }
     }
 
