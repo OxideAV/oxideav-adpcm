@@ -20,14 +20,20 @@
 //!
 //! # Interface
 //!
-//! The Recommendation's PCM interface is 14-bit uniform (or A-law /
-//! µ-law via G.711, which this crate does not re-implement — the
-//! optional §3.6 / §3.7 law-domain output conversion and synchronous
-//! coding adjustment are out of scope here). The [`State::encode_i16`] /
-//! [`State::decode_i16`] convenience pair maps standard 16-bit PCM onto
-//! that 14-bit interface (`>> 2` on input, clamp + `<< 2` on output);
-//! [`State::encode_step`] / [`State::decode_step`] expose the raw
-//! 14-bit words.
+//! The Recommendation's PCM interface is either 14-bit uniform or
+//! log-companded A-law / µ-law per G.711. Both are implemented:
+//!
+//! * [`State::encode_i16`] / [`State::decode_i16`] map standard 16-bit
+//!   PCM onto the 14-bit uniform interface (`>> 2` on input, clamp +
+//!   `<< 2` on output); [`State::encode_step`] / [`State::decode_step`]
+//!   expose the raw 14-bit words.
+//! * [`State::encode_law`] / [`State::decode_law`] speak G.711
+//!   log-PCM directly: the §4.2.1 EXPAND input conversion on the
+//!   encoder side, and the full §4.2.8 output chain — COMPRESS,
+//!   re-EXPAND, and the SYNC synchronous coding adjustment (Tables
+//!   16-19/G.726) — on the decoder side. This is the interface the
+//!   ITU conformance test sequences (Appendix II) exercise; the
+//!   in-tree vector suite pins it byte-exactly.
 //!
 //! On the wire a G.726 stream is a headerless run of 2/3/4/5-bit codes.
 //! Two packing conventions exist: **MSB-first** (each code inserted from
@@ -598,6 +604,217 @@ fn trans(td: u32, yl: u32, dq: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// G.711 log-PCM interface (§4.2.1 EXPAND, §4.2.8 COMPRESS + SYNC)
+// ---------------------------------------------------------------------------
+
+/// G.711 companding law of the PCM interface (`LAW` input pin of
+/// Figures 4 and 11/G.726).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Law {
+    /// `LAW = 1` — A-law. Code words carry the G.711 even-bit
+    /// inversion (§4.2.1 note: "S (and SP) includes even bit
+    /// inversion"), i.e. positive zero is `0xD5`.
+    ALaw,
+    /// `LAW = 0` — µ-law. Code words are the transmitted (inverted)
+    /// character signals; positive zero is `0xFF`.
+    ULaw,
+}
+
+/// A-law code word → 13-bit signed-magnitude `SS` (sign bit 1 =
+/// negative), per Tables 1a/1b col. 6→7 of G.711: segment 0 outputs
+/// the odd mid-rise levels `2m + 1`, segment `s >= 1` outputs
+/// `(2m + 33) << (s - 1)`.
+fn alaw_to_ss(s: u8) -> u32 {
+    let b = (s ^ 0x55) as u32; // undo even-bit inversion
+    let pos = b >> 7; // A-law character sign bit: 1 = positive
+    let seg = (b >> 4) & 7;
+    let mant = b & 15;
+    let mag = if seg == 0 {
+        (mant << 1) + 1
+    } else {
+        ((mant << 1) + 33) << (seg - 1)
+    };
+    ((1 - pos) << 12) | mag
+}
+
+/// µ-law code word → 14-bit signed-magnitude `SS` (sign bit 1 =
+/// negative), per Tables 2a/2b col. 6→7 of G.711: the bias-33
+/// mid-tread ladder `((2m + 33) << s) - 33` (segment-0 levels
+/// 0, 2, …, 30; overall maximum 8031).
+fn ulaw_to_ss(s: u8) -> u32 {
+    let b = !s as u32 & 0xFF; // undo the transmitted inversion
+    let neg = b >> 7; // 1 = negative
+    let seg = (b >> 4) & 7;
+    let mant = b & 15;
+    let mag = (((mant << 1) + 33) << seg) - 33;
+    (neg << 13) | mag
+}
+
+/// A-law quantizer level (0..=127) for a 12-bit-domain magnitude with
+/// the *positive*-side interval convention: a G.711 Table 1a decision
+/// value belongs to the interval above it (`IMAG = 2` already encodes
+/// level 1, Table 15/G.726).
+fn alaw_level_pos(v: u32) -> u32 {
+    if v >= 4096 {
+        // Beyond the virtual decision value: maximum PCM code word
+        // (note below Table 15/G.726).
+        return 127;
+    }
+    if v < 32 {
+        return v >> 1; // segment 0, step 2
+    }
+    let seg = exp_log(v) - 4; // 32<<(seg-1) <= v < 32<<seg
+    (seg << 4) | ((v - (32 << (seg - 1))) >> seg)
+}
+
+/// A-law quantizer level for the *negative* side: a Table 1b decision
+/// value belongs to the interval below it (`IMAG = 2` still encodes
+/// level 0, Table 15/G.726), i.e. the positive ladder shifted by one.
+fn alaw_level_neg(v: u32) -> u32 {
+    if v >= 4096 {
+        return 127;
+    }
+    alaw_level_pos(v.saturating_sub(1))
+}
+
+/// µ-law quantizer level (0..=127) for a 13-bit-domain magnitude; the
+/// same convention serves both signs (Table 15/G.726: `IMAG = 1`
+/// encodes level 1 for `IS = 0` and `IS = 1` alike). Bias-33 segment
+/// search over the Table 2a/2b decision values.
+fn ulaw_level(v: u32) -> u32 {
+    if v >= 8159 {
+        // Virtual decision value x128 = 8159: maximum PCM code word.
+        return 127;
+    }
+    let b = v + 33; // 33 <= b < 8192 ⇒ segment 0..=7
+    let seg = exp_log(b) - 5;
+    (seg << 4) | ((b >> (seg + 1)) & 15)
+}
+
+/// EXPAND (§4.2.1): G.711 log-PCM code word → 14-bit two's-complement
+/// uniform PCM `SL`. The A-law 13-bit signed-magnitude value is
+/// doubled into the µ-law-scaled 14-bit domain (`SSQ = SSM << 1`).
+pub fn expand(s: u8, law: Law) -> u32 {
+    let (sss, ssq) = match law {
+        Law::ULaw => {
+            let ss = ulaw_to_ss(s);
+            (ss >> 13, ss & 8191)
+        }
+        Law::ALaw => {
+            let ss = alaw_to_ss(s);
+            (ss >> 12, (ss & 4095) << 1)
+        }
+    };
+    if sss == 0 {
+        ssq
+    } else {
+        (16384 - ssq) & 16383
+    }
+}
+
+/// COMPRESS (§4.2.8, decoder only): 16-bit two's-complement
+/// reconstructed signal `SR` → G.711 log-PCM code word `SP`.
+///
+/// The A-law path halves the magnitude back into the 12-bit domain
+/// with the spec's asymmetric rounding (`IM >> 1` positive,
+/// `(IM + 1) >> 1` negative) before quantizing; magnitudes beyond the
+/// virtual decision value saturate to the maximum code word.
+pub fn compress(sr: u32, law: Law) -> u8 {
+    let is = sr >> 15;
+    let im = if is == 0 { sr } else { (65536 - sr) & 32767 };
+    match law {
+        Law::ULaw => {
+            let lvl = ulaw_level(im);
+            // Character signal: complement of (sign | segment |
+            // quantization); sign bit 1 for negative values.
+            (!((is << 7) | lvl)) as u8
+        }
+        Law::ALaw => {
+            let lvl = if is == 0 {
+                alaw_level_pos(im >> 1)
+            } else {
+                alaw_level_neg((im + 1) >> 1)
+            };
+            // Character sign bit 1 = positive; even-bit inversion on
+            // the wire.
+            ((((1 - is) << 7) | lvl) ^ 0x55) as u8
+        }
+    }
+}
+
+/// `SP+` / `SP−` of the SYNC block: the PCM code word of the next more
+/// positive (`up = true`) or more negative output level, clamped at
+/// the extremes. Pinned by the Table 20/G.726 worked examples — in
+/// particular the µ-law dual zero: stepping down from `+0` skips `-0`
+/// (same output level) to `-2`, while stepping up from `-2` lands on
+/// `-0`.
+fn law_neighbor(sp: u8, law: Law, up: bool) -> u8 {
+    match law {
+        Law::ALaw => {
+            let b = (sp ^ 0x55) as u32;
+            let pos = b >> 7; // 1 = positive
+            let lvl = b & 0x7F;
+            let (pos, lvl) = if up == (pos == 1) {
+                // Away from zero on this side of the ladder.
+                (pos, (lvl + 1).min(127))
+            } else if lvl > 0 {
+                (pos, lvl - 1)
+            } else {
+                // Cross the origin: A-law has no zero level, so
+                // ±level-0 are adjacent.
+                (1 - pos, 0)
+            };
+            (((pos << 7) | lvl) ^ 0x55) as u8
+        }
+        Law::ULaw => {
+            let b = !sp as u32 & 0xFF;
+            let neg = b >> 7; // 1 = negative
+            let lvl = b & 0x7F;
+            let (neg, lvl) = if up == (neg == 0) {
+                (neg, (lvl + 1).min(127))
+            } else if lvl > 0 {
+                (neg, lvl - 1)
+            } else {
+                // Cross the origin, skipping the other sign's zero
+                // code (it is the *same* output level, not a more
+                // positive/negative one).
+                (1 - neg, 1)
+            };
+            (!((neg << 7) | lvl)) as u8
+        }
+    }
+}
+
+/// SYNC (§4.2.8, decoder only): synchronous coding adjustment for
+/// tandem codings. Re-encodes the compressed output and nudges `SP`
+/// one PCM level so a subsequent encoder reproduces the received code.
+///
+/// The `ID` definitions of Tables 16-19/G.726 are exactly the QUAN
+/// decision intervals folded onto the signed code ordering, so `ID`
+/// is computed by reusing [`quan`] and applying the same `IM` sign
+/// fold as the received code.
+fn sync(rate: Rate, i: u32, sp: u8, dlnx: u32, dsx: u32, law: Law) -> u8 {
+    let half = 1u32 << (rate.bits() - 1);
+    // IM: signed reordering of the code space — positive codes above
+    // negative ones (e.g. 40 kbit/s: IM = I + 16 when I >= 0, I & 15
+    // otherwise).
+    let fold = |c: u32| {
+        if c & half == 0 {
+            c + half
+        } else {
+            c & (half - 1)
+        }
+    };
+    let im = fold(i);
+    let id = fold(quan(rate, dsx, dlnx));
+    match id.cmp(&im) {
+        core::cmp::Ordering::Equal => sp,
+        core::cmp::Ordering::Less => law_neighbor(sp, law, true),
+        core::cmp::Ordering::Greater => law_neighbor(sp, law, false),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------
 
@@ -773,11 +990,8 @@ impl State {
         sr
     }
 
-    /// Encode one 14-bit uniform-PCM sample (`-8192..=8191`; values
-    /// outside are clamped) into a G.726 code word (2/3/4/5 bits,
-    /// right-aligned).
-    pub fn encode_step(&mut self, sl14: i16) -> u8 {
-        let sl = (sl14.clamp(-8192, 8191) as i32 as u32) & 16383;
+    /// Shared encoder core over the 14-bit TC uniform word `SL`.
+    fn encode_sl(&mut self, sl: u32) -> u8 {
         let (se, sez) = self.predict();
         let y = self.scale_factor();
         // SUBTA (§4.2.1): D = SL - SE with 16-bit sign extension.
@@ -789,6 +1003,42 @@ impl State {
         let i = quan(self.rate, ds, subtb(dl, y));
         self.update(i, y, se, sez);
         i as u8
+    }
+
+    /// Encode one 14-bit uniform-PCM sample (`-8192..=8191`; values
+    /// outside are clamped) into a G.726 code word (2/3/4/5 bits,
+    /// right-aligned).
+    pub fn encode_step(&mut self, sl14: i16) -> u8 {
+        self.encode_sl((sl14.clamp(-8192, 8191) as i32 as u32) & 16383)
+    }
+
+    /// Encode one G.711 log-PCM code word (§4.2.1 EXPAND front-end,
+    /// Figure 4/G.726) into a G.726 code word.
+    pub fn encode_law(&mut self, s: u8, law: Law) -> u8 {
+        self.encode_sl(expand(s, law))
+    }
+
+    /// Decode one G.726 code word into a G.711 log-PCM code word —
+    /// the full §4.2.8 output chain: COMPRESS the reconstructed
+    /// signal, re-EXPAND it, re-quantize the resulting difference and
+    /// apply the SYNC synchronous coding adjustment. This is the
+    /// decoder the ITU conformance sequences specify.
+    pub fn decode_law(&mut self, code: u8, law: Law) -> u8 {
+        let i = code as u32 & self.rate.code_mask();
+        let (se, sez) = self.predict();
+        let y = self.scale_factor();
+        let sr = self.update(i, y, se, sez);
+        // COMPRESS + EXPAND (§4.2.8): SP, then its uniform-domain
+        // requantization SLX.
+        let sp = compress(sr, law);
+        let slx = expand(sp, law);
+        // SUBTA + LOG + SUBTB with SLX in place of SL.
+        let sli = if slx >> 13 == 0 { slx } else { 49152 + slx };
+        let sei = if se >> 14 == 0 { se } else { 32768 + se };
+        let dx = (sli + 65536 - sei) & 65535;
+        let (dlx, dsx) = log(dx);
+        let dlnx = subtb(dlx, y);
+        sync(self.rate, i, sp, dlnx, dsx, law)
     }
 
     /// Decode one G.726 code word into the reconstructed 14-bit uniform
@@ -1180,6 +1430,82 @@ mod tests {
         // the documented wraparound: 2·16383 ≡ 256 with the mantissa
         // rounding folded in.
         assert_eq!(fmult(16384, floatb(16383)), 256, "WAnEXP > 26 wrap");
+    }
+
+    #[test]
+    #[allow(clippy::identity_op)] // 2·IMAG spelled out to mirror Table 15
+    fn compress_matches_table15_examples() {
+        // Table 15/G.726: conversion in the vicinity of the origin.
+        // IMAG for A-law is the post-halving magnitude, so feed SR
+        // values that reproduce it: positive IM = 2·IMAG (IM >> 1),
+        // negative IM = 2·IMAG - 1 or 2·IMAG ((IM + 1) >> 1).
+        // µ-law positive rows (IS = 0, IMAG = SR).
+        assert_eq!(compress(3, Law::ULaw), 0b1111_1101);
+        assert_eq!(compress(2, Law::ULaw), 0b1111_1110);
+        assert_eq!(compress(1, Law::ULaw), 0b1111_1110);
+        assert_eq!(compress(0, Law::ULaw), 0b1111_1111);
+        // µ-law negative rows (IS = 1): SR = 65536 - IMAG.
+        assert_eq!(compress(65536 - 1, Law::ULaw), 0b0111_1110);
+        assert_eq!(compress(65536 - 2, Law::ULaw), 0b0111_1110);
+        assert_eq!(compress(65536 - 3, Law::ULaw), 0b0111_1101);
+        // A-law positive rows: IMAG = IM >> 1.
+        assert_eq!(compress(2 * 3, Law::ALaw), 0b1101_0100);
+        assert_eq!(compress(2 * 2, Law::ALaw), 0b1101_0100);
+        assert_eq!(compress(2 * 1, Law::ALaw), 0b1101_0101);
+        assert_eq!(compress(0, Law::ALaw), 0b1101_0101);
+        // A-law negative rows: IMAG = (IM + 1) >> 1 ⇒ IM = 2·IMAG - 1.
+        assert_eq!(compress(65536 - (2 * 1 - 1), Law::ALaw), 0b0101_0101);
+        assert_eq!(compress(65536 - (2 * 2 - 1), Law::ALaw), 0b0101_0101);
+        assert_eq!(compress(65536 - (2 * 3 - 1), Law::ALaw), 0b0101_0100);
+    }
+
+    #[test]
+    fn sync_neighbors_match_table20_examples() {
+        // Table 20/G.726: re-encoding in the vicinity of the origin.
+        // ID < IM ⇒ SP+, ID > IM ⇒ SP−.
+        let up = |sp: u8, law: Law| law_neighbor(sp, law, true);
+        let dn = |sp: u8, law: Law| law_neighbor(sp, law, false);
+        // A-law rows.
+        assert_eq!(dn(0b1101_0101, Law::ALaw), 0b0101_0101);
+        assert_eq!(up(0b1101_0101, Law::ALaw), 0b1101_0100);
+        assert_eq!(dn(0b0101_0101, Law::ALaw), 0b0101_0100);
+        assert_eq!(up(0b0101_0101, Law::ALaw), 0b1101_0101);
+        assert_eq!(dn(0b0101_0100, Law::ALaw), 0b0101_0111);
+        assert_eq!(up(0b0101_0100, Law::ALaw), 0b0101_0101);
+        // µ-law rows — including the dual-zero skip.
+        assert_eq!(dn(0b1111_1110, Law::ULaw), 0b1111_1111);
+        assert_eq!(up(0b1111_1110, Law::ULaw), 0b1111_1101);
+        assert_eq!(dn(0b1111_1111, Law::ULaw), 0b0111_1110);
+        assert_eq!(up(0b1111_1111, Law::ULaw), 0b1111_1110);
+        assert_eq!(dn(0b0111_1110, Law::ULaw), 0b0111_1101);
+        assert_eq!(up(0b0111_1110, Law::ULaw), 0b0111_1111);
+        // Ladder extremes clamp (SP+ / SP− constrained to SP).
+        assert_eq!(up(0xFF ^ 0x55, Law::ALaw), 0xFF ^ 0x55); // most positive A-law
+        assert_eq!(dn(0x7F ^ 0x55, Law::ALaw), 0x7F ^ 0x55); // most negative A-law
+        assert_eq!(up(0x80, Law::ULaw), 0x80); // most positive µ-law (!0x7F)
+        assert_eq!(dn(0x00, Law::ULaw), 0x00); // most negative µ-law (!0xFF)
+    }
+
+    #[test]
+    fn expand_compress_round_trip_every_code_word() {
+        // Every G.711 code word expands to a uniform value that
+        // compresses back to the same code word (the decoder output
+        // levels sit inside their own decision intervals).
+        for law in [Law::ALaw, Law::ULaw] {
+            for s in 0..=255u8 {
+                let sl = expand(s, law);
+                // 14-bit TC → 16-bit TC for COMPRESS input.
+                let sr = if sl >> 13 == 0 { sl } else { 49152 + sl };
+                let back = compress(sr, law);
+                // µ-law has two zero codes (0xFF / 0x7F) that share
+                // one output level; COMPRESS canonicalizes -0 to +0.
+                if law == Law::ULaw && s == 0x7F {
+                    assert_eq!(back, 0xFF, "µ-law -0 canonicalizes to +0");
+                } else {
+                    assert_eq!(back, s, "{law:?} code {s:#04x} round trip");
+                }
+            }
+        }
     }
 
     #[test]
