@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **G.726 log-PCM (G.711) interface + proven bit-exactness** — the
+  Recommendation's A-law/µ-law PCM interfaces are now implemented on
+  the direct API: §4.2.1 EXPAND on the encoder side
+  (`g726::State::encode_law`) and the full §4.2.8 output chain —
+  COMPRESS, re-EXPAND, difference re-quantization and the SYNC
+  synchronous coding adjustment (Tables 16-19 via the QUAN ladders,
+  SP+/SP− neighbours per the Table 20 examples, µ-law dual-zero skip
+  included) — on the decoder side (`g726::State::decode_law`), with
+  `g726::Law` and the `expand` / `compress` conversions public. The
+  official ITU-T G.726 Appendix II digital test sequences are staged
+  under `tests/fixtures/g726/` and pinned as a byte-exact CI gate in
+  `tests/g726_conformance.rs`: all reset and homing legs, encoder and
+  decoder, normal + overload + full-codeword-sweep inputs, A-law +
+  µ-law + both cross-law decode paths (112 sequence comparisons), plus
+  a synchronous-tandem rig that re-encodes the verified decoder
+  outputs through two further stages and requires PCM-identical
+  results. The homing legs reproduce the Appendix II initialization
+  procedure (`pcm_init.*` / `i_ini_<rate>.*`, with the files'
+  88-word ASCII annotation trailer pinned and stripped); the one
+  shipped vector generated from the reset state (`hn16fc.o`) is
+  reproduced as shipped and documented. Law-path property tests cover
+  the EXPAND front-end equivalence and the no-panic domain of
+  `decode_law`.
+
 - **ITU-T G.726 narrowband ADPCM** (`adpcm_g726`) — decoder + encoder
   for all four rates (40/32/24/16 kbit/s; 5/4/3/2 bits per sample) as a
   bit-exact transcription of Recommendation G.726 (12/1990) §4.2: the

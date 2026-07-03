@@ -135,12 +135,21 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   crosses `send_frame` calls (`flush` emits the zero-padded tail). The
   G.726-specific `bit_order` option picks the in-byte packing: `msb`
   (default — the network/RTP convention and the WAV `0x0045` framing
-  produced by common tools) or `lsb`. Mono only; the Recommendation's
-  A-law/µ-law PCM interfaces and the §3.7 synchronous-coding adjustment
-  are out of scope (G.711 lives in its own crate) — the linear
-  interface maps 16-bit PCM onto the spec's 14-bit uniform words
-  (`>> 2` in, clamp + `<< 2` out). Direct API under `g726::`
-  (`State`, `Rate`, `BitOrder`, `BitPacker`/`BitUnpacker`,
+  produced by common tools) or `lsb`. Mono only. Two PCM interfaces:
+  the registry path speaks 16-bit linear mapped onto the spec's 14-bit
+  uniform words (`>> 2` in, clamp + `<< 2` out; standalone G.711
+  streams remain the `oxideav-g711` codec tags' domain), while the
+  direct API also implements the Recommendation's log-PCM interface —
+  §4.2.1 EXPAND on the encoder side and the full §4.2.8 output chain
+  (COMPRESS → re-EXPAND → re-quantization → SYNC synchronous coding
+  adjustment, Tables 15-20) on the decoder side
+  (`State::encode_law` / `State::decode_law`, `Law::{ALaw, ULaw}`,
+  `expand` / `compress`). **Proven bit-exact against the official ITU
+  Appendix II conformance test sequences** — every reset and homing
+  vector, both directions, all four rates, both laws and both
+  cross-law decode legs reproduce byte-for-byte (see
+  `tests/g726_conformance.rs`). Direct API under `g726::`
+  (`State`, `Rate`, `Law`, `BitOrder`, `BitPacker`/`BitUnpacker`,
   `encode_packet`/`decode_packet`, `pack_codes`/`unpack_codes`).
 
 ### Typed variant accessor
@@ -209,6 +218,22 @@ never split a code) and requires the validator's decode to correlate
 > 0.97 with the input. `tests/g726_registry.rs` covers the registry
 path: per-rate round trips under both bit orders, packetization
 invariance, option validation, tag routing and reset semantics.
+
+`tests/g726_conformance.rs` is the strongest gate in the crate: the
+official ITU-T G.726 Appendix II digital test sequences (staged under
+`tests/fixtures/g726/`, 16-bit LE word form) run byte-exactly through
+both directions — 16 reset + 16 homing encoder legs (normal + overload
+inputs, A-law + µ-law), 32 reset + 32 homing decoder legs including the
+cross-law `fx`/`fc` paths, and 16 full-codeword decoder sweeps. The
+homing legs first drive the codec to the homed state with the Appendix
+II initialization sequences (`pcm_init.*` through the encoder,
+`i_ini_<rate>.*` through the decoder; the binary files carry an 88-word
+ASCII annotation trailer after the 3496-word payload, which the harness
+pins and strips). One shipped vector (`hn16fc.o`) was generated from
+the reset state rather than the homed state; the test reproduces it as
+shipped and documents the quirk. A final rig re-encodes the verified
+decoder outputs through two further synchronous stages and requires
+PCM-identical results — the §4.2.8 SYNC tandem-transparency guarantee.
 
 `tests/encode_validate.rs` runs the *opposite* direction — it proves our
 **encoder** emits spec-conformant bytes, not merely bytes our own decoder
@@ -287,9 +312,14 @@ constants (uncopyrightable facts).
   16-bit signed-magnitude form (Table 6 note b, mandatory at
   40 kbit/s). The quantizer decision ladders (Tables 7-10) were
   verified against the synchronous-coding `ID` tables (Tables 16-19).
-  The ITU Appendix II digital test sequences are not staged
-  (TIES-gated), so bit-exactness is pinned by construction (a hand
-  trace of the §4.2 arithmetic) plus black-box cross-validation.
+  The G.711 log-PCM interface (§4.2.1 EXPAND, §4.2.8 COMPRESS/SYNC)
+  is transcribed from the same Recommendation, with the per-sign
+  quantization conventions and the SP+/SP− neighbour rules pinned by
+  the Table 15 and Table 20 worked examples. Bit-exactness is proven
+  by the ITU Appendix II digital test sequences (black-box
+  input→output data staged from `docs/audio/adpcm/g726/conformance/`
+  into `tests/fixtures/g726/`); no reference implementation of any
+  kind was consulted.
 - **OKI / Dialogic VOX ADPCM** — 49-entry step table and 8-entry
   step-pointer adjustment from Dialogic Corporation's *Dialogic ADPCM
   Algorithm* application note (doc 00-1366-001, 1988). Headerless `.vox`
