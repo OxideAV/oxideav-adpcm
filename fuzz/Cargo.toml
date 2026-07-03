@@ -112,3 +112,15 @@ name = "encode_packet_stream"
 path = "fuzz_targets/encode_packet_stream.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "decode_packet_g726"
+path = "fuzz_targets/decode_packet_g726.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode_packet_g726"
+path = "fuzz_targets/encode_packet_g726.rs"
+test = false
+doc = false

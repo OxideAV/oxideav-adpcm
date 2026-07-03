@@ -518,3 +518,137 @@ fn build_extradata_round_trips_for_arbitrary_spb_and_custom_pairs() {
         assert_eq!(parsed, coeffs, "build/parse not inverse (spb={spb})");
     }
 }
+
+// ----- G.726 encoder (stream-oriented at the bit level) ---------------
+
+/// Adversarial PCM (full-range i16 noise, including ±32767 swings that
+/// saturate the 14-bit uniform interface) must encode without panicking
+/// at every rate under both bit orders, produce codes that all fit the
+/// rate's code width, pack to exactly `ceil(n·bits/8)` bytes after the
+/// flush, and stay byte-identical under arbitrary frame splits.
+#[test]
+fn g726_encoder_full_range_noise_is_split_invariant() {
+    use oxideav_adpcm::g726;
+    let mut rng = Lcg::new(0x00FA_0726u64);
+    for &rate in g726::Rate::all() {
+        for order in [g726::BitOrder::MsbFirst, g726::BitOrder::LsbFirst] {
+            let pcm = {
+                let mut v = rng.pcm(997);
+                // Force hard saturation edges into the sweep.
+                v[0] = i16::MAX;
+                v[1] = i16::MIN;
+                v[2] = 0;
+                v
+            };
+            let mut st = g726::State::new(rate);
+            let mut pk = g726::BitPacker::new(order);
+            let mut bytes = g726::encode_packet(&pcm, &mut st, &mut pk);
+            pk.flush(&mut bytes);
+            assert_eq!(
+                bytes.len(),
+                (pcm.len() * rate.bits() as usize).div_ceil(8),
+                "{rate:?} {order:?}: packed length"
+            );
+            // Every unpacked code fits the code width (unpack_codes
+            // masks nothing away that pack_codes didn't write).
+            for (i, code) in g726::unpack_codes(&bytes, rate, order).iter().enumerate() {
+                assert!(
+                    *code < (1 << rate.bits()),
+                    "{rate:?} {order:?}: code {code:#x} at {i} exceeds width"
+                );
+            }
+            // Split encode at a rate-unaligned boundary is wire-equal.
+            let mut st2 = g726::State::new(rate);
+            let mut pk2 = g726::BitPacker::new(order);
+            let mut bytes2 = g726::encode_packet(&pcm[..451], &mut st2, &mut pk2);
+            bytes2.extend_from_slice(&g726::encode_packet(&pcm[451..], &mut st2, &mut pk2));
+            pk2.flush(&mut bytes2);
+            assert_eq!(bytes, bytes2, "{rate:?} {order:?}: split changed bytes");
+        }
+    }
+}
+
+/// DC extremes held for thousands of samples drive the scale factor to
+/// its LIMB rails without overflow: the reconstruction the decoder
+/// derives from those bytes stays inside i16 and converges toward the
+/// saturated 14-bit input rather than oscillating.
+#[test]
+fn g726_encoder_dc_extremes_converge_without_overflow() {
+    use oxideav_adpcm::g726;
+    for &rate in g726::Rate::all() {
+        for target in [i16::MAX, i16::MIN] {
+            let pcm = vec![target; 3000];
+            let mut enc = g726::State::new(rate);
+            let mut pk = g726::BitPacker::new(g726::BitOrder::MsbFirst);
+            let mut bytes = g726::encode_packet(&pcm, &mut enc, &mut pk);
+            pk.flush(&mut bytes);
+            let mut dec = g726::State::new(rate);
+            let mut un = g726::BitUnpacker::new(g726::BitOrder::MsbFirst);
+            let mut out = Vec::new();
+            g726::decode_packet(&bytes, &mut dec, &mut un, &mut out);
+            // The 14-bit interface clamps at ±8192<<2; after the
+            // adaptation transient the reconstruction must sit within
+            // a coarse band of the rail (all rates, even 2-bit).
+            let clamped = (target >> 2).clamp(-8192, 8191) << 2;
+            let tail = &out[out.len() - 500..];
+            for (i, s) in tail.iter().enumerate() {
+                assert!(
+                    (*s as i32 - clamped as i32).abs() <= 4096,
+                    "{rate:?} target={target}: tail sample {i} = {s} far from rail {clamped}"
+                );
+            }
+        }
+    }
+}
+
+/// The registry-path encoder mirrors the direct API byte-for-byte under
+/// pseudo-random frame sizes (the packer's sub-byte residue crosses
+/// `send_frame` calls), and its flush emits the zero-padded tail.
+#[test]
+fn g726_registry_encoder_matches_direct_api_across_random_frames() {
+    use oxideav_adpcm::{g726, CODEC_ID_G726};
+    use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame};
+    let mut rng = Lcg::new(0x00FA_0727u64);
+    let mut reg = CodecRegistry::new();
+    oxideav_adpcm::register_codecs(&mut reg);
+    for bits in ["2", "3", "4", "5"] {
+        let pcm = rng.pcm(1201);
+        let rate = g726::Rate::from_bits(bits.parse().unwrap()).unwrap();
+        // Direct one-shot reference.
+        let mut st = g726::State::new(rate);
+        let mut pk = g726::BitPacker::new(g726::BitOrder::MsbFirst);
+        let mut reference = g726::encode_packet(&pcm, &mut st, &mut pk);
+        pk.flush(&mut reference);
+        // Registry path, random frame sizes.
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
+        params.sample_rate = Some(8_000);
+        params.channels = Some(1);
+        params.options.insert("bits_per_sample", bits);
+        let mut enc = reg.first_encoder(&params).expect("encoder factory");
+        let mut bytes = Vec::new();
+        let mut off = 0usize;
+        while off < pcm.len() {
+            let len = 1 + (rng.next_u64() as usize % 97);
+            let end = (off + len).min(pcm.len());
+            let mut data = Vec::with_capacity((end - off) * 2);
+            for s in &pcm[off..end] {
+                data.extend_from_slice(&s.to_le_bytes());
+            }
+            enc.send_frame(&Frame::Audio(AudioFrame {
+                samples: (end - off) as u32,
+                pts: None,
+                data: vec![data],
+            }))
+            .expect("send_frame");
+            while let Ok(pkt) = enc.receive_packet() {
+                bytes.extend_from_slice(&pkt.data);
+            }
+            off = end;
+        }
+        enc.flush().expect("flush");
+        while let Ok(pkt) = enc.receive_packet() {
+            bytes.extend_from_slice(&pkt.data);
+        }
+        assert_eq!(bytes, reference, "bits={bits}: registry encoder diverged");
+    }
+}

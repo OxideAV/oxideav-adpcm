@@ -32,8 +32,9 @@
 //! glue path is on the no-panic contract as well.
 
 use oxideav_adpcm::{
-    decoder, dialogic, ima_qt, ima_wav, ms, register_codecs, yamaha, yamaha_a, CODEC_ID_DIALOGIC,
-    CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
+    decoder, dialogic, g726, ima_qt, ima_wav, ms, register_codecs, yamaha, yamaha_a,
+    CODEC_ID_DIALOGIC, CODEC_ID_G726, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
+    CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
 };
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Packet, TimeBase};
 
@@ -617,6 +618,7 @@ fn registry_decoder_send_random_packet_never_panics() {
         CODEC_ID_YAMAHA,
         CODEC_ID_YAMAHA_A,
         CODEC_ID_DIALOGIC,
+        CODEC_ID_G726,
     ] {
         let mut params = CodecParameters::audio(CodecId::new(codec_id));
         params.sample_rate = Some(22_050);
@@ -665,6 +667,7 @@ fn registry_decoder_accepts_empty_packets() {
         CODEC_ID_YAMAHA,
         CODEC_ID_YAMAHA_A,
         CODEC_ID_DIALOGIC,
+        CODEC_ID_G726,
     ] {
         let mut params = CodecParameters::audio(CodecId::new(codec_id));
         params.sample_rate = Some(8_000);
@@ -697,6 +700,7 @@ fn registry_decoder_factory_rejects_zero_channels() {
         CODEC_ID_YAMAHA,
         CODEC_ID_YAMAHA_A,
         CODEC_ID_DIALOGIC,
+        CODEC_ID_G726,
     ] {
         let mut params = CodecParameters::audio(CodecId::new(codec_id));
         params.sample_rate = Some(8_000);
@@ -736,12 +740,102 @@ fn registry_decoder_reports_its_codec_id() {
         CODEC_ID_YAMAHA,
         CODEC_ID_YAMAHA_A,
         CODEC_ID_DIALOGIC,
+        CODEC_ID_G726,
     ] {
         let mut params = CodecParameters::audio(CodecId::new(codec_id));
         params.sample_rate = Some(8_000);
         params.channels = Some(1);
         let dec = reg.first_decoder(&params).expect("decoder factory");
         assert_eq!(dec.codec_id().as_str(), codec_id);
+    }
+}
+
+// ----- G.726 (stream-oriented at the bit level) ----------------------
+
+/// Any byte pattern is a syntactically valid G.726 stream (there is no
+/// header to malform), so the decoder must accept arbitrary bytes at
+/// every rate under both bit orders, emit exactly one sample per whole
+/// code, and never panic — including with debug overflow checks on.
+#[test]
+fn g726_any_byte_stream_decodes_one_sample_per_code() {
+    let mut lcg = Lcg::new(0xD726_0001);
+    for &rate in g726::Rate::all() {
+        for order in [g726::BitOrder::MsbFirst, g726::BitOrder::LsbFirst] {
+            let mut payload = vec![0u8; 4096];
+            lcg.fill(&mut payload);
+            let mut st = g726::State::new(rate);
+            let mut un = g726::BitUnpacker::new(order);
+            let mut out = Vec::new();
+            g726::decode_packet(&payload, &mut st, &mut un, &mut out);
+            assert_eq!(
+                out.len(),
+                payload.len() * 8 / rate.bits() as usize,
+                "{rate:?} {order:?}: one sample per whole code"
+            );
+        }
+    }
+}
+
+/// Truncation is harmless: every prefix of a stream decodes cleanly,
+/// and the sample count only ever grows with the prefix length.
+#[test]
+fn g726_truncated_prefixes_never_panic() {
+    let mut lcg = Lcg::new(0xD726_0002);
+    let mut payload = vec![0u8; 61];
+    lcg.fill(&mut payload);
+    for &rate in g726::Rate::all() {
+        let mut prev = 0usize;
+        for n in 0..=payload.len() {
+            let mut st = g726::State::new(rate);
+            let mut un = g726::BitUnpacker::new(g726::BitOrder::MsbFirst);
+            let mut out = Vec::new();
+            g726::decode_packet(&payload[..n], &mut st, &mut un, &mut out);
+            assert!(out.len() >= prev, "{rate:?}: sample count shrank at {n}");
+            prev = out.len();
+        }
+    }
+}
+
+/// The registry-trait path shares the no-panic contract: pseudo-random
+/// packets of pseudo-random sizes stream through `send_packet` /
+/// `receive_frame` at every rate without error (G.726 rejects no byte
+/// pattern) and the total PCM matches the one-shot decode bit-for-bit.
+#[test]
+fn g726_registry_path_random_packets_match_one_shot_decode() {
+    let mut lcg = Lcg::new(0xD726_0003);
+    let mut reg = CodecRegistry::new();
+    register_codecs(&mut reg);
+    for bits in ["2", "3", "4", "5"] {
+        let mut payload = vec![0u8; 1024];
+        lcg.fill(&mut payload);
+        // One-shot reference through the direct API.
+        let rate = g726::Rate::from_bits(bits.parse().unwrap()).unwrap();
+        let mut st = g726::State::new(rate);
+        let mut un = g726::BitUnpacker::new(g726::BitOrder::MsbFirst);
+        let mut reference = Vec::new();
+        g726::decode_packet(&payload, &mut st, &mut un, &mut reference);
+        // Registry path with random packet sizes.
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
+        params.sample_rate = Some(8_000);
+        params.channels = Some(1);
+        params.options.insert("bits_per_sample", bits);
+        let mut dec = reg.first_decoder(&params).expect("decoder factory");
+        let tb = TimeBase::new(1, 8_000);
+        let mut got = Vec::new();
+        let mut off = 0usize;
+        while off < payload.len() {
+            let len = 1 + (lcg.next_u8() as usize % 17);
+            let end = (off + len).min(payload.len());
+            dec.send_packet(&Packet::new(0, tb, payload[off..end].to_vec()))
+                .expect("send_packet never fails on G.726 bytes");
+            if let Ok(oxideav_core::Frame::Audio(af)) = dec.receive_frame() {
+                for pair in af.data[0].chunks_exact(2) {
+                    got.push(i16::from_le_bytes([pair[0], pair[1]]));
+                }
+            }
+            off = end;
+        }
+        assert_eq!(got, reference, "bits={bits}: registry path diverged");
     }
 }
 
