@@ -195,10 +195,15 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .tag(CodecTag::wave_format(0x0203)),
     );
     // adpcm_g726 — ITU-T G.726 (Rec. G.726, 12/1990). The documented
-    // WAV assignment is WAVE_FORMAT_G721_ADPCM = 0x0040 (the 4-bit
+    // WAV assignments are WAVE_FORMAT_G721_ADPCM = 0x0040 (the 4-bit
     // 32 kbit/s rate — G.726 consolidates G.721, so the tag routes a
-    // WAV demuxer to this decoder at its 4-bit default). The other
-    // three rates are reached via the `bits_per_sample` codec option.
+    // WAV demuxer to this decoder at its 4-bit default) and
+    // WAVE_FORMAT_G723_ADPCM = 0x0014 (the older CCITT G.723 ADPCM,
+    // 3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates — also consolidated
+    // into G.726; the catalogue notes "the G.721 header format is
+    // essentially the same as G.723"). Both tags route here; the rate
+    // for either is taken from wBitsPerSample via the `bits_per_sample`
+    // codec option (the other rates are reached the same way).
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_G726))
             .capabilities(
@@ -208,7 +213,8 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             )
             .decoder(decoder::make_decoder)
             .encoder(encoder::make_encoder)
-            .tag(CodecTag::wave_format(0x0040)),
+            .tag(CodecTag::wave_format(0x0040))
+            .tag(CodecTag::wave_format(0x0014)),
     );
 }
 
@@ -416,6 +422,26 @@ mod tests {
             .resolve_tag_ref(&ProbeContext::new(&wf))
             .expect("0x0203 must resolve to a registered codec");
         assert_eq!(Variant::from_codec_id(id), Some(Variant::Dialogic));
+    }
+
+    #[test]
+    fn g723_alias_tag_routes_to_g726() {
+        // WAVE_FORMAT_G723_ADPCM (0x0014) is the older CCITT G.723 ADPCM
+        // (3-/5-bit rates), consolidated into G.726 alongside G.721
+        // (0x0040). Both resolve to the G726 variant and register a
+        // decoder; the canonical tag stays 0x0040.
+        assert_eq!(Variant::from_wave_format_tag(0x0014), Some(Variant::G726));
+        assert!(Variant::G726.wave_format_tags().contains(&0x0014));
+        assert_eq!(Variant::G726.wave_format_tag(), Some(0x0040));
+
+        use oxideav_core::{CodecTag, ProbeContext};
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        let wf = CodecTag::wave_format(0x0014);
+        let id = reg
+            .resolve_tag_ref(&ProbeContext::new(&wf))
+            .expect("0x0014 must resolve to a registered codec");
+        assert_eq!(Variant::from_codec_id(id), Some(Variant::G726));
     }
 
     #[test]

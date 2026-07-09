@@ -16,7 +16,7 @@ QuickTime / VOX / FM-synth streams.
 | `adpcm_yamaha`    | Yamaha ADPCM-B / DELTA-T (Y8950/YM2608-B/YMZ280B/AICA) | WAV tag `0x0020` |
 | `adpcm_yamaha_a`  | Yamaha ADPCM-A (YM2608/YM2610 rhythm channels) | chip-internal; no WAV tag |
 | `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless) **and** WAV tags `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) / `0x0203` (`WAVE_FORMAT_DIALOGIC_OKI_ADPCM`) |
-| `adpcm_g726`      | ITU-T G.726 narrowband ADPCM (40/32/24/16 kbit/s) | telephony / RTP; WAV tag `0x0040` (`WAVE_FORMAT_G721_ADPCM`, the 4-bit rate) |
+| `adpcm_g726`      | ITU-T G.726 narrowband ADPCM (40/32/24/16 kbit/s) | telephony / RTP; WAV tags `0x0040` (`WAVE_FORMAT_G721_ADPCM`, 4-bit) / `0x0014` (`WAVE_FORMAT_G723_ADPCM`, the older 3-/5-bit G.723 rates) |
 
 G.722 (WAV tag `0x0028`) and G.723.1 / G.729 live in their own crates
 and are not re-implemented here.
@@ -193,8 +193,13 @@ answers to (canonical first, then any documented alias) and backs both
 `wave_format_tag()` and `from_wave_format_tag()`: `Variant::Dialogic`
 answers to both `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) and its `0x0203`
 (`WAVE_FORMAT_DIALOGIC_OKI_ADPCM`) alias — the same 4-bit OKI VOX body —
-and each alias is registered on the codec so `from_wave_format_tag` and
-the container registry stay in lockstep. Lib-side tests pin these accessors against what
+and `Variant::G726` answers to both `0x0040` (`WAVE_FORMAT_G721_ADPCM`,
+the 4-bit 32 kbit/s rate) and `0x0014` (`WAVE_FORMAT_G723_ADPCM`, the
+older CCITT G.723 ADPCM at 3-bit / 24 kbit/s and 5-bit / 40 kbit/s — the
+1990 Recommendation consolidates both G.721 and G.723, so the tag routes
+the demuxer to this decoder at the rate `wBitsPerSample` selects). Each
+alias is registered on the codec so `from_wave_format_tag` and the
+container registry stay in lockstep. Lib-side tests pin these accessors against what
 `register_codecs` and the per-block decoders actually do, so a new
 variant must update both surfaces in lockstep.
 

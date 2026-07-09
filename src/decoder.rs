@@ -186,8 +186,8 @@ impl Variant {
     /// Empty for the two tagless variants (IMA-QT is FourCC-routed,
     /// ADPCM-A is chip-internal).
     ///
-    /// Most variants own exactly one tag. One answers to a second,
-    /// documented alias tag for an identical bitstream:
+    /// Most variants own exactly one tag. Two answer to a second,
+    /// documented alias tag for the *same* ITU / OKI algorithm:
     ///
     /// - `Dialogic` also answers to `0x0203`
     ///   (`WAVE_FORMAT_DIALOGIC_OKI_ADPCM`) — the Dialogic WAV framing of
@@ -196,6 +196,13 @@ impl Variant {
     ///   carries. The staged catalogue records both as "created and read
     ///   by the OKI ADPCM chip set", so both decode byte-identically
     ///   through this variant's registry decoder.
+    /// - `G726` also answers to `0x0014` (`WAVE_FORMAT_G723_ADPCM`) — the
+    ///   older CCITT G.723 ADPCM, whose 3-bit (24 kbit/s) and 5-bit
+    ///   (40 kbit/s) rates the 1990 G.726 Recommendation consolidates
+    ///   alongside G.721 (`0x0040`, the 4-bit rate). The staged catalogue
+    ///   notes the G.721 header format is "essentially the same as G.723";
+    ///   the rate is selected from `wBitsPerSample` (the `bits_per_sample`
+    ///   codec option on the registry decoder).
     ///
     /// This is the single source of truth for both
     /// [`Variant::wave_format_tag`] (which returns the first element) and
@@ -208,7 +215,7 @@ impl Variant {
             Variant::ImaWav => &[0x0011],
             Variant::Yamaha => &[0x0020],
             Variant::Dialogic => &[0x0010, 0x0203],
-            Variant::G726 => &[0x0040],
+            Variant::G726 => &[0x0040, 0x0014],
             Variant::ImaQt | Variant::YamahaA => &[],
         }
     }
@@ -237,8 +244,10 @@ impl Variant {
     ///   OKI VOX body).
     /// - `0x0011` → `Variant::ImaWav` (`WAVE_FORMAT_DVI_ADPCM`).
     /// - `0x0020` → `Variant::Yamaha` (`WAVE_FORMAT_YAMAHA_ADPCM`).
-    /// - `0x0040` → `Variant::G726` (`WAVE_FORMAT_G721_ADPCM` — the
-    ///   32 kbit/s 4-bit rate; G.726 consolidates G.721).
+    /// - `0x0040` / `0x0014` → `Variant::G726` (`WAVE_FORMAT_G721_ADPCM`
+    ///   32 kbit/s 4-bit, and `WAVE_FORMAT_G723_ADPCM` 24/40 kbit/s
+    ///   3-/5-bit; the 1990 G.726 Recommendation consolidates both older
+    ///   G.721 and G.723 ADPCM standards).
     ///
     /// Every other `wFormatTag` — including tags that belong to *other*
     /// codec families (`0x0001` PCM, `0x0028` G.722, …) and the two
@@ -255,7 +264,7 @@ impl Variant {
             0x0010 | 0x0203 => Some(Variant::Dialogic),
             0x0011 => Some(Variant::ImaWav),
             0x0020 => Some(Variant::Yamaha),
-            0x0040 => Some(Variant::G726),
+            0x0040 | 0x0014 => Some(Variant::G726),
             _ => None,
         }
     }

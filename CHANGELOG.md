@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`WAVE_FORMAT_G723_ADPCM` (`0x0014`) alias tag for G.726** — the older
+  CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates) that
+  the 1990 G.726 Recommendation consolidates alongside G.721 now routes
+  to the `adpcm_g726` decoder: the tag is registered on the codec and
+  `Variant::from_wave_format_tag(0x0014)` returns `Variant::G726`. The
+  rate is taken from `wBitsPerSample` (the `bits_per_sample` codec
+  option); the canonical G.726 tag stays `0x0040`
+  (`WAVE_FORMAT_G721_ADPCM`, the 4-bit rate). The staged catalogue notes
+  "the G.721 header format is essentially the same as G.723".
+
 - **`WAVE_FORMAT_DIALOGIC_OKI_ADPCM` (`0x0203`) alias tag** — the staged
   `WAVE_FORMAT_*` catalogue assigns a second WAV tag to the OKI VOX body
   the `adpcm_dialogic` variant already decodes: `0x0203`
