@@ -166,14 +166,50 @@ impl Variant {
     ///
     /// `None` for ADPCM-IMA-QT (QuickTime addresses it via a fourcc) and
     /// ADPCM-A (chip-internal — no WAV assignment).
+    ///
+    /// The *canonical* tag is the first element of
+    /// [`Variant::wave_format_tags`]; a couple of variants additionally
+    /// answer to a documented alias tag (see that method).
     pub const fn wave_format_tag(self) -> Option<u16> {
+        // `[T]::first()` is not const-stable on the pinned toolchain and
+        // `is_empty()` trips `clippy::len_zero` in a const context, so
+        // match the slice directly.
+        match self.wave_format_tags() {
+            [canonical, ..] => Some(*canonical),
+            [] => None,
+        }
+    }
+
+    /// Every `WAVEFORMATEX::wFormatTag` this variant answers to, in
+    /// preference order — the canonical assignment first, then any
+    /// documented alias tag that frames the *same* on-wire algorithm.
+    /// Empty for the two tagless variants (IMA-QT is FourCC-routed,
+    /// ADPCM-A is chip-internal).
+    ///
+    /// Most variants own exactly one tag. One answers to a second,
+    /// documented alias tag for an identical bitstream:
+    ///
+    /// - `Dialogic` also answers to `0x0203`
+    ///   (`WAVE_FORMAT_DIALOGIC_OKI_ADPCM`) — the Dialogic WAV framing of
+    ///   the same 4-bit OKI VOX body (mono, `nBlockAlign = 1`, no
+    ///   extra-format-data) that `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) also
+    ///   carries. The staged catalogue records both as "created and read
+    ///   by the OKI ADPCM chip set", so both decode byte-identically
+    ///   through this variant's registry decoder.
+    ///
+    /// This is the single source of truth for both
+    /// [`Variant::wave_format_tag`] (which returns the first element) and
+    /// the reverse [`Variant::from_wave_format_tag`]. Tag values mirror
+    /// the `WAVE_FORMAT_*` enumeration staged in
+    /// `docs/audio/adpcm/sdl_sound-wave-types.html`.
+    pub const fn wave_format_tags(self) -> &'static [u16] {
         match self {
-            Variant::Ms => Some(0x0002),
-            Variant::ImaWav => Some(0x0011),
-            Variant::Yamaha => Some(0x0020),
-            Variant::Dialogic => Some(0x0010),
-            Variant::G726 => Some(0x0040),
-            Variant::ImaQt | Variant::YamahaA => None,
+            Variant::Ms => &[0x0002],
+            Variant::ImaWav => &[0x0011],
+            Variant::Yamaha => &[0x0020],
+            Variant::Dialogic => &[0x0010, 0x0203],
+            Variant::G726 => &[0x0040],
+            Variant::ImaQt | Variant::YamahaA => &[],
         }
     }
 
@@ -196,7 +232,9 @@ impl Variant {
     /// variants with a canonical WAV-format assignment resolve:
     ///
     /// - `0x0002` → `Variant::Ms` (`WAVE_FORMAT_ADPCM`).
-    /// - `0x0010` → `Variant::Dialogic` (`WAVE_FORMAT_OKI_ADPCM`).
+    /// - `0x0010` / `0x0203` → `Variant::Dialogic` (`WAVE_FORMAT_OKI_ADPCM`
+    ///   and its `WAVE_FORMAT_DIALOGIC_OKI_ADPCM` alias — the same 4-bit
+    ///   OKI VOX body).
     /// - `0x0011` → `Variant::ImaWav` (`WAVE_FORMAT_DVI_ADPCM`).
     /// - `0x0020` → `Variant::Yamaha` (`WAVE_FORMAT_YAMAHA_ADPCM`).
     /// - `0x0040` → `Variant::G726` (`WAVE_FORMAT_G721_ADPCM` — the
@@ -209,12 +247,12 @@ impl Variant {
     /// `WAVE_FORMAT_*` enumeration staged in
     /// `docs/audio/adpcm/sdl_sound-wave-types.html`.
     ///
-    /// `from_wave_format_tag(v.wave_format_tag().unwrap()) == Some(v)` for
-    /// every variant whose `wave_format_tag()` is `Some`.
+    /// `from_wave_format_tag(tag) == Some(v)` for every `tag` in every
+    /// variant's [`Variant::wave_format_tags`], canonical or alias.
     pub const fn from_wave_format_tag(tag: u16) -> Option<Self> {
         match tag {
             0x0002 => Some(Variant::Ms),
-            0x0010 => Some(Variant::Dialogic),
+            0x0010 | 0x0203 => Some(Variant::Dialogic),
             0x0011 => Some(Variant::ImaWav),
             0x0020 => Some(Variant::Yamaha),
             0x0040 => Some(Variant::G726),

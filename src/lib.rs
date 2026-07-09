@@ -177,7 +177,11 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     // "created and read by the OKI ADPCM chip set"). The 4-bit WAV-OKI
     // body is the canonical VOX layout — two samples per byte, high
     // nibble first — which the registry decoder already produces, so the
-    // tag routes a WAV demuxer straight to this decoder.
+    // tag routes a WAV demuxer straight to this decoder. The catalogue
+    // also assigns WAVE_FORMAT_DIALOGIC_OKI_ADPCM = 0x0203 ("Dialogic OKI
+    // ADPCM": mono, nBlockAlign = 1, no extra-format-data, 4 bits/sample,
+    // "created and read by either OKI ADPCM chip set or by a firmware
+    // program") to the identical body, so both tags route here.
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_DIALOGIC))
             .capabilities(
@@ -187,7 +191,8 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             )
             .decoder(decoder::make_decoder)
             .encoder(encoder::make_encoder)
-            .tag(CodecTag::wave_format(0x0010)),
+            .tag(CodecTag::wave_format(0x0010))
+            .tag(CodecTag::wave_format(0x0203)),
     );
     // adpcm_g726 — ITU-T G.726 (Rec. G.726, 12/1990). The documented
     // WAV assignment is WAVE_FORMAT_G721_ADPCM = 0x0040 (the 4-bit
@@ -339,20 +344,78 @@ mod tests {
         let mut reg = CodecRegistry::new();
         register_codecs(&mut reg);
         for &v in Variant::all() {
-            let Some(tag) = v.wave_format_tag() else {
-                continue;
-            };
-            let wf = CodecTag::wave_format(tag);
-            let id = reg
-                .resolve_tag_ref(&ProbeContext::new(&wf))
-                .unwrap_or_else(|| panic!("no codec registered for wave tag {tag:#06x} ({v:?})"));
-            let resolved = Variant::from_codec_id(id)
-                .unwrap_or_else(|| panic!("registered tag {tag:#06x} resolved to non-ADPCM id"));
-            assert_eq!(
-                resolved, v,
-                "wave tag {tag:#06x}: accessor says {v:?} but registry resolves {resolved:?}"
-            );
+            // Every tag the variant answers to — canonical *and* alias —
+            // must resolve through the registry to this same variant.
+            for &tag in v.wave_format_tags() {
+                let wf = CodecTag::wave_format(tag);
+                let id = reg
+                    .resolve_tag_ref(&ProbeContext::new(&wf))
+                    .unwrap_or_else(|| {
+                        panic!("no codec registered for wave tag {tag:#06x} ({v:?})")
+                    });
+                let resolved = Variant::from_codec_id(id).unwrap_or_else(|| {
+                    panic!("registered tag {tag:#06x} resolved to non-ADPCM id")
+                });
+                assert_eq!(
+                    resolved, v,
+                    "wave tag {tag:#06x}: accessor says {v:?} but registry resolves {resolved:?}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn wave_format_tags_are_the_single_source_of_truth() {
+        // `wave_format_tag()` is the head of `wave_format_tags()`, and
+        // every tag in the slice (canonical or alias) resolves back to
+        // its owning variant through `from_wave_format_tag`.
+        for &v in Variant::all() {
+            let tags = v.wave_format_tags();
+            assert_eq!(
+                v.wave_format_tag(),
+                tags.first().copied(),
+                "{v:?}: wave_format_tag() must be the head of wave_format_tags()"
+            );
+            for &tag in tags {
+                assert_eq!(
+                    Variant::from_wave_format_tag(tag),
+                    Some(v),
+                    "{v:?}: tag {tag:#06x} did not resolve back to the variant"
+                );
+            }
+        }
+        // Only the two tagless variants carry no tag.
+        for &v in Variant::all() {
+            if v.wave_format_tags().is_empty() {
+                assert!(
+                    matches!(v, Variant::ImaQt | Variant::YamahaA),
+                    "{v:?} unexpectedly has no wave-format tag"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dialogic_oki_alias_tag_routes_to_dialogic() {
+        // WAVE_FORMAT_DIALOGIC_OKI_ADPCM (0x0203) frames the same 4-bit
+        // OKI VOX body as WAVE_FORMAT_OKI_ADPCM (0x0010); both resolve to
+        // the Dialogic variant and register a decoder.
+        assert_eq!(
+            Variant::from_wave_format_tag(0x0203),
+            Some(Variant::Dialogic)
+        );
+        assert!(Variant::Dialogic.wave_format_tags().contains(&0x0203));
+        // Canonical tag is unchanged (still 0x0010).
+        assert_eq!(Variant::Dialogic.wave_format_tag(), Some(0x0010));
+
+        use oxideav_core::{CodecTag, ProbeContext};
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        let wf = CodecTag::wave_format(0x0203);
+        let id = reg
+            .resolve_tag_ref(&ProbeContext::new(&wf))
+            .expect("0x0203 must resolve to a registered codec");
+        assert_eq!(Variant::from_codec_id(id), Some(Variant::Dialogic));
     }
 
     #[test]

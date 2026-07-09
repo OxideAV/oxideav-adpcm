@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`WAVE_FORMAT_DIALOGIC_OKI_ADPCM` (`0x0203`) alias tag** — the staged
+  `WAVE_FORMAT_*` catalogue assigns a second WAV tag to the OKI VOX body
+  the `adpcm_dialogic` variant already decodes: `0x0203`
+  ("Dialogic OKI ADPCM": mono, `nBlockAlign = 1`, no extra-format-data,
+  4 bits/sample) frames the identical 4-bit high-nibble-first body as
+  `WAVE_FORMAT_OKI_ADPCM` (`0x0010`). A WAV demuxer that parses `0x0203`
+  now resolves straight to the Dialogic decoder: the tag is registered
+  on the codec and `Variant::from_wave_format_tag(0x0203)` returns
+  `Variant::Dialogic`. New `Variant::wave_format_tags()` accessor returns
+  every tag a variant answers to (canonical first, then aliases) and is
+  the single source of truth for `wave_format_tag()` and
+  `from_wave_format_tag()`; the canonical tag (`0x0010`) is unchanged.
+
 - **G.726 log-PCM (G.711) interface + proven bit-exactness** — the
   Recommendation's A-law/µ-law PCM interfaces are now implemented on
   the direct API: §4.2.1 EXPAND on the encoder side
