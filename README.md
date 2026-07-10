@@ -156,6 +156,17 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   `tests/g726_conformance.rs`). Direct API under `g726::`
   (`State`, `Rate`, `Law`, `BitOrder`, `BitPacker`/`BitUnpacker`,
   `encode_packet`/`decode_packet`, `pack_codes`/`unpack_codes`).
+  The registry also answers to the `0x0014` (`WAVE_FORMAT_G723_ADPCM`)
+  tag — the older CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit /
+  40 kbit/s) that the 1990 Recommendation consolidates alongside G.721 —
+  with the rate taken from `wBitsPerSample`. For that WAV framing
+  (whole-byte sub-blocks rather than the raw bit-continuous telephony
+  stream), `g726::wav_subblock_bytes` / `wav_block_align` compute the
+  block geometry a muxer/demuxer needs (`bits·channels`-byte sub-blocks,
+  16 to a block plus `nAuxBlockSize`), reproducing the staged catalogue's
+  tabulated `nBlockAlign` rows (48 / 96 / 80 / 160). The intra-sub-block
+  bit-ordering figure did not survive in the archived catalogue, so only
+  the byte geometry is exposed, not a sub-block decoder.
 
 ### Typed variant accessor
 

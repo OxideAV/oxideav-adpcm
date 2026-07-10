@@ -17,7 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rate is taken from `wBitsPerSample` (the `bits_per_sample` codec
   option); the canonical G.726 tag stays `0x0040`
   (`WAVE_FORMAT_G721_ADPCM`, the 4-bit rate). The staged catalogue notes
-  "the G.721 header format is essentially the same as G.723".
+  "the G.721 header format is essentially the same as G.723". New
+  `g726::wav_subblock_bytes` / `wav_block_align` const helpers (plus
+  `WAV_SUBBLOCKS_PER_BLOCK` / `WAV_SAMPLES_PER_BLOCK`) compute the
+  WAV block-alignment geometry for these tags — a sub-block is
+  `bits_per_sample * channels` bytes (8 samples/channel) and `nBlockAlign`
+  is 16 sub-blocks plus `nAuxBlockSize`, reproducing the catalogue's
+  tabulated 48 / 96 / 80 / 160 rows exactly at `aux = 0`. (The intra-byte
+  bit ordering of a sub-block did not survive in the archived document, so
+  no sub-block decoder is offered — only the byte geometry the tabulated
+  values pin.)
 
 - **`WAVE_FORMAT_DIALOGIC_OKI_ADPCM` (`0x0203`) alias tag** — the staged
   `WAVE_FORMAT_*` catalogue assigns a second WAV tag to the OKI VOX body

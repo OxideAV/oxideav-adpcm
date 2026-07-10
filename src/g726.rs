@@ -140,6 +140,64 @@ impl Rate {
 }
 
 // ---------------------------------------------------------------------------
+// G.723 / G.721 ADPCM in a RIFF/WAVE container — block-alignment geometry
+// ---------------------------------------------------------------------------
+//
+// The raw telephony stream is bit-continuous (one code word after another,
+// straddling byte boundaries), but when the same code words are carried in
+// a RIFF/WAVE `data` chunk under WAVE_FORMAT_G723_ADPCM (0x0014) or
+// WAVE_FORMAT_G721_ADPCM (0x0040) they are grouped into whole-byte
+// sub-blocks. The staged catalogue (docs/audio/adpcm/sdl_sound-wave-types
+// .html, "CCITT G.723 ADPCM" / "The algorithm for G.721 header format is
+// essentially the same as G723") gives the layout:
+//
+//   * one sub-block holds 8 samples *per channel*, bit-packed into whole
+//     bytes: `bits_per_sample * channels` bytes (3-bit mono = 3 bytes,
+//     3-bit stereo = 6, 5-bit mono = 5, 5-bit stereo = 10 — the four rows
+//     the document tabulates; 4-bit G.721 follows the same rule at 4/8);
+//   * `nBlockAlign` is 16 such sub-blocks (128 samples per channel) plus an
+//     optional per-block auxiliary prefix, so the document's tabulated
+//     values are 48 / 96 (3-bit mono / stereo) and 80 / 160 (5-bit mono /
+//     stereo), each "+ nAuxBlockSize" (nAuxBlockSize is 0 "in most
+//     instances").
+//
+// These helpers let a WAV muxer/demuxer compute the framing without
+// hard-coding the tabulated rows. The exact bit ordering *inside* each
+// sub-block is not recoverable from the archived document (the bit-grid
+// figure did not survive), so no sub-block *decoder* is offered here — only
+// the byte geometry, which the tabulated `nBlockAlign` values pin exactly.
+
+/// Number of 8-sample sub-blocks in one G.723/G.721-in-WAV data block
+/// (`nBlockAlign` minus any auxiliary prefix divides into this many).
+pub const WAV_SUBBLOCKS_PER_BLOCK: usize = 16;
+
+/// Samples **per channel** carried by one G.723/G.721-in-WAV data block:
+/// [`WAV_SUBBLOCKS_PER_BLOCK`] × 8 = 128.
+pub const WAV_SAMPLES_PER_BLOCK: usize = WAV_SUBBLOCKS_PER_BLOCK * 8;
+
+/// Bytes in one G.723/G.721-in-WAV sub-block (8 samples per channel,
+/// bit-packed into whole bytes): `rate.bits() * channels`.
+///
+/// Matches the document's tabulated sub-block sizes — 3 (3-bit mono),
+/// 6 (3-bit stereo), 5 (5-bit mono), 10 (5-bit stereo) — and extends by
+/// the stated "essentially the same" rule to 4 / 8 for the 4-bit G.721
+/// tag. Returns 0 only for a 0-channel request.
+pub const fn wav_subblock_bytes(rate: Rate, channels: u16) -> usize {
+    rate.bits() as usize * channels as usize
+}
+
+/// `nBlockAlign` for a G.723/G.721-in-WAV stream: 16 sub-blocks
+/// (128 samples per channel) plus `aux_bytes` of per-block auxiliary data
+/// (`nAuxBlockSize`, normally 0).
+///
+/// Reproduces the document's tabulated values exactly at
+/// `aux_bytes == 0`: 48 / 96 for 3-bit mono / stereo and 80 / 160 for
+/// 5-bit mono / stereo.
+pub const fn wav_block_align(rate: Rate, channels: u16, aux_bytes: usize) -> usize {
+    wav_subblock_bytes(rate, channels) * WAV_SUBBLOCKS_PER_BLOCK + aux_bytes
+}
+
+// ---------------------------------------------------------------------------
 // QUAN decision ladders (encoder side)
 // ---------------------------------------------------------------------------
 //
@@ -1301,6 +1359,43 @@ mod tests {
         }
         for bad in [0u8, 1, 6, 8, 255] {
             assert_eq!(Rate::from_bits(bad), None);
+        }
+    }
+
+    #[test]
+    fn g723_wav_block_align_matches_tabulated_rows() {
+        // The four rows tabulated in the staged catalogue's "CCITT G.723
+        // ADPCM" section — nBlockAlign at aux = 0 — reproduce exactly.
+        assert_eq!(wav_block_align(Rate::R24, 1, 0), 48); // 3-bit mono
+        assert_eq!(wav_block_align(Rate::R24, 2, 0), 96); // 3-bit stereo
+        assert_eq!(wav_block_align(Rate::R40, 1, 0), 80); // 5-bit mono
+        assert_eq!(wav_block_align(Rate::R40, 2, 0), 160); // 5-bit stereo
+
+        // Sub-block sizes (8 samples/channel, whole bytes) likewise.
+        assert_eq!(wav_subblock_bytes(Rate::R24, 1), 3);
+        assert_eq!(wav_subblock_bytes(Rate::R24, 2), 6);
+        assert_eq!(wav_subblock_bytes(Rate::R40, 1), 5);
+        assert_eq!(wav_subblock_bytes(Rate::R40, 2), 10);
+        // 4-bit G.721 follows the same "essentially the same" rule.
+        assert_eq!(wav_subblock_bytes(Rate::R32, 1), 4);
+        assert_eq!(wav_subblock_bytes(Rate::R32, 2), 8);
+    }
+
+    #[test]
+    fn g723_wav_block_geometry_is_internally_consistent() {
+        // A block is exactly 16 sub-blocks (128 samples/channel), plus an
+        // optional auxiliary prefix, for every rate and channel count.
+        assert_eq!(WAV_SAMPLES_PER_BLOCK, 128);
+        for &rate in Rate::all() {
+            for channels in 1u16..=2 {
+                let sub = wav_subblock_bytes(rate, channels);
+                assert_eq!(sub, rate.bits() as usize * channels as usize);
+                for aux in [0usize, 4, 17] {
+                    let block = wav_block_align(rate, channels, aux);
+                    assert_eq!(block, sub * WAV_SUBBLOCKS_PER_BLOCK + aux);
+                    assert_eq!((block - aux) / sub, WAV_SUBBLOCKS_PER_BLOCK);
+                }
+            }
         }
     }
 
