@@ -13,6 +13,8 @@ use oxideav_adpcm::g726::{
     self, wav_block_align, wav_decode_packet, wav_encode_packet, wav_pack_codes,
     wav_rate_supported, wav_strip_aux, wav_subblock_bytes, wav_unpack_codes, Rate, State,
 };
+use oxideav_adpcm::CODEC_ID_G726;
+use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
 // ---------------------------------------------------------------------------
 // Staged packing vectors (docs/audio/adpcm/g72x-wav/bitcell-vectors.txt)
@@ -285,6 +287,159 @@ fn state_carries_across_packets_no_per_block_reset() {
         }
         assert_eq!(whole, split, "rate {rate:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Registry path (`framing=wav` codec option)
+// ---------------------------------------------------------------------------
+
+fn wav_params(channels: u16, bits: &str, extra: &[(&str, &str)]) -> CodecParameters {
+    let mut p = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
+    p.sample_rate = Some(8000);
+    p.channels = Some(channels);
+    p.options.insert("framing", "wav");
+    p.options.insert("bits_per_sample", bits);
+    for (k, v) in extra {
+        p.options.insert(*k, *v);
+    }
+    p
+}
+
+fn registry() -> CodecRegistry {
+    let mut reg = CodecRegistry::new();
+    oxideav_adpcm::register_codecs(&mut reg);
+    reg
+}
+
+/// Feed `bytes` to a registry decoder in `pkt_len`-byte packets and
+/// collect the interleaved PCM.
+fn registry_decode(p: &CodecParameters, bytes: &[u8], pkt_len: usize) -> Vec<i16> {
+    let reg = registry();
+    let mut dec = reg.first_decoder(p).expect("decoder factory");
+    let tb = TimeBase::new(1, 8000);
+    let mut out = Vec::new();
+    for chunk in bytes.chunks(pkt_len.max(1)) {
+        dec.send_packet(&Packet::new(0, tb, chunk.to_vec()))
+            .expect("send_packet");
+        if let Ok(Frame::Audio(af)) = dec.receive_frame() {
+            for pair in af.data[0].chunks_exact(2) {
+                out.push(i16::from_le_bytes([pair[0], pair[1]]));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn registry_wav_decode_matches_direct_api() {
+    for &(rate, bits) in &[(Rate::R24, "3"), (Rate::R32, "4"), (Rate::R40, "5")] {
+        for channels in 1u16..=2 {
+            let n = 512 * channels as usize;
+            let pcm = sine(n, 620.0, 11000.0, 0.4);
+            let mut enc: Vec<State> = (0..channels).map(|_| State::new(rate)).collect();
+            let bytes = wav_encode_packet(&pcm, &mut enc).unwrap();
+
+            let mut direct: Vec<State> = (0..channels).map(|_| State::new(rate)).collect();
+            let want = wav_decode_packet(&bytes, &mut direct).unwrap();
+
+            // Odd packet split (7 bytes) exercises sub-block straddling.
+            let got = registry_decode(&wav_params(channels, bits, &[]), &bytes, 7);
+            assert_eq!(got, want, "rate {rate:?} ch {channels}");
+        }
+    }
+}
+
+#[test]
+fn registry_wav_decode_strips_aux_across_packet_splits() {
+    let rate = Rate::R24;
+    let aux = 4usize;
+    let block = wav_block_align(rate, 1, aux);
+    let pcm = sine(3 * 128, 300.0, 13000.0, 0.0); // three full blocks
+    let mut enc = [State::new(rate)];
+    let payload = wav_encode_packet(&pcm, &mut enc).unwrap();
+    assert_eq!(payload.len(), 3 * 48);
+
+    // Interleave a 4-byte aux prefix ahead of every 48-byte block.
+    let mut data = Vec::new();
+    for chunk in payload.chunks(48) {
+        data.extend_from_slice(&[0xEE; 4]);
+        data.extend_from_slice(chunk);
+    }
+    assert_eq!(data.len(), 3 * block);
+
+    let p = wav_params(1, "3", &[("aux_block_size", "4")]);
+    // Whole-buffer decode and a 5-byte packet split (which lands
+    // mid-prefix and mid-sub-block) must agree with the aux-free path.
+    let mut direct = [State::new(rate)];
+    let want = wav_decode_packet(&payload, &mut direct).unwrap();
+    assert_eq!(registry_decode(&p, &data, data.len()), want);
+    assert_eq!(registry_decode(&p, &data, 5), want);
+}
+
+#[test]
+fn registry_wav_decoder_reset_reseeds_lanes_and_block_pos() {
+    let rate = Rate::R40;
+    let pcm = sine(2 * 256, 900.0, 10000.0, 0.0);
+    let mut enc = [State::new(rate), State::new(rate)];
+    let bytes = wav_encode_packet(&pcm, &mut enc).unwrap();
+
+    let reg = registry();
+    let p = wav_params(2, "5", &[]);
+    let mut dec = reg.first_decoder(&p).expect("decoder factory");
+    let tb = TimeBase::new(1, 8000);
+    let run = |dec: &mut Box<dyn oxideav_core::Decoder>| -> Vec<u8> {
+        dec.send_packet(&Packet::new(0, tb, bytes.clone())).unwrap();
+        match dec.receive_frame() {
+            Ok(Frame::Audio(af)) => af.data[0].clone(),
+            other => panic!("expected audio frame, got {other:?}"),
+        }
+    };
+    let first = run(&mut dec);
+    dec.reset().unwrap();
+    let second = run(&mut dec);
+    assert_eq!(first, second, "reset must re-seed both lanes");
+}
+
+#[test]
+fn registry_wav_option_validation() {
+    let reg = registry();
+    // 2-bit rate has no WAV tag.
+    assert!(reg.first_decoder(&wav_params(1, "2", &[])).is_err());
+    // The bit-cell grid fixes MSB-first packing.
+    assert!(reg
+        .first_decoder(&wav_params(1, "4", &[("bit_order", "lsb")]))
+        .is_err());
+    // …but an explicit msb (the grid's order) stays accepted.
+    assert!(reg
+        .first_decoder(&wav_params(1, "4", &[("bit_order", "msb")]))
+        .is_ok());
+    // Stereo needs the WAV framing; the raw telephony stream is mono.
+    let mut raw_stereo = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
+    raw_stereo.sample_rate = Some(8000);
+    raw_stereo.channels = Some(2);
+    raw_stereo.options.insert("bits_per_sample", "4");
+    assert!(reg.first_decoder(&raw_stereo).is_err());
+    assert!(reg.first_decoder(&wav_params(2, "4", &[])).is_ok());
+    // Three channels exceed the container's stereo interleave.
+    assert!(reg.first_decoder(&wav_params(3, "4", &[])).is_err());
+    // Unknown framing value.
+    let mut bogus = wav_params(1, "4", &[]);
+    bogus.options.insert("framing", "subblock");
+    assert!(reg.first_decoder(&bogus).is_err());
+    // aux_block_size demands framing=wav…
+    let mut aux_raw = wav_params(1, "4", &[("aux_block_size", "4")]);
+    aux_raw.options.insert("framing", "raw");
+    assert!(reg.first_decoder(&aux_raw).is_err());
+    // …and must be numeric.
+    assert!(reg
+        .first_decoder(&wav_params(1, "4", &[("aux_block_size", "some")]))
+        .is_err());
+    // framing is a G.726-only option.
+    let mut ms = CodecParameters::audio(CodecId::new(oxideav_adpcm::CODEC_ID_MS));
+    ms.sample_rate = Some(8000);
+    ms.channels = Some(1);
+    ms.options.insert("framing", "wav");
+    assert!(reg.first_decoder(&ms).is_err());
 }
 
 #[test]

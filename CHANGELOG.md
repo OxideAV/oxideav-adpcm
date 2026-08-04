@@ -28,6 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   surviving catalogue bit row independently of the packer, and covers
   stereo lane independence, cross-packet state carriage and
   failed-call state-purity.
+- **`framing` / `aux_block_size` codec options (G.726 registry
+  decoder)** — `framing=wav` switches the `adpcm_g726` decoder from the
+  raw bit-continuous telephony stream onto the G.723/G.721-in-WAV
+  sub-block layout: MSB-first bit-cell unpacking (an explicit
+  `bit_order=lsb` is rejected — the grid fixes the order), 1..=2
+  channels (the container defines a stereo interleave; each lane is an
+  independent codec state), only the documented 3-/4-/5-bit rates, and
+  a per-block `aux_block_size` (`nAuxBlockSize`) auxiliary prefix
+  stripped incrementally — block position, sub-byte bits *and* a
+  lane-alignment code carry all persist across packets, so a demuxer
+  may split blocks anywhere (including mid-prefix and mid-frame).
+  `reset` re-seeds every lane plus the framing cursors.
 
 - **`WAVE_FORMAT_G723_ADPCM` (`0x0014`) alias tag for G.726** — the older
   CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates) that

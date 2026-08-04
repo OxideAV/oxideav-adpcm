@@ -719,6 +719,72 @@ pub(crate) fn parse_g726_law_option(
     }
 }
 
+/// G.726 stream framing selected by the `framing` codec option.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub(crate) enum G726Framing {
+    /// The raw bit-continuous telephony stream (default): one code
+    /// after another, straddling byte boundaries, packed per the
+    /// `bit_order` option.
+    #[default]
+    Raw,
+    /// The G.723/G.721-in-WAV container layout (tags 0x0014 / 0x0040):
+    /// whole-byte 8-sample sub-blocks per the staged bit-cell grid
+    /// (fixed MSB-first), optionally prefixed per block by
+    /// `aux_block_size` auxiliary bytes, mono or stereo.
+    Wav,
+}
+
+/// Parse the `framing` codec option. Accepted only for
+/// [`Variant::G726`]: `"raw"` (default) or `"wav"`.
+pub(crate) fn parse_g726_framing_option(
+    variant: Variant,
+    params: &CodecParameters,
+) -> Result<G726Framing> {
+    match params.options.get("framing") {
+        None => Ok(G726Framing::Raw),
+        Some(v) => {
+            if variant != Variant::G726 {
+                return Err(Error::unsupported(format!(
+                    "adpcm: framing option {v:?} is only valid for adpcm_g726, not {variant:?}"
+                )));
+            }
+            match v {
+                "raw" => Ok(G726Framing::Raw),
+                "wav" => Ok(G726Framing::Wav),
+                other => Err(Error::unsupported(format!(
+                    "adpcm_g726: framing option {other:?} not supported (raw or wav)"
+                ))),
+            }
+        }
+    }
+}
+
+/// Parse the `aux_block_size` codec option (`nAuxBlockSize` — bytes of
+/// auxiliary data at the start of every WAV data block). Accepted only
+/// for [`Variant::G726`] with `framing=wav`; defaults to 0.
+pub(crate) fn parse_g726_aux_option(
+    variant: Variant,
+    framing: G726Framing,
+    params: &CodecParameters,
+) -> Result<usize> {
+    match params.options.get("aux_block_size") {
+        None => Ok(0),
+        Some(v) => {
+            if variant != Variant::G726 || framing != G726Framing::Wav {
+                return Err(Error::unsupported(format!(
+                    "adpcm: aux_block_size option {v:?} is only valid for adpcm_g726 \
+                     with framing=wav"
+                )));
+            }
+            v.parse().map_err(|_| {
+                Error::invalid(format!(
+                    "adpcm_g726: aux_block_size option {v:?} is not a number"
+                ))
+            })
+        }
+    }
+}
+
 pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>> {
     let variant = Variant::from_codec_id(&params.codec_id).ok_or_else(|| {
         Error::unsupported(format!(
@@ -770,11 +836,21 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         }
         Variant::G726 => {
             // Recommendation G.726 is a single-channel 8 kHz telephony
-            // codec; the headerless code stream defines no channel
-            // interleave.
-            if channels != 1 {
+            // codec; the raw headerless code stream defines no channel
+            // interleave. The G.723/G.721-in-WAV container layout
+            // (`framing=wav`) does define a two-channel sub-block
+            // interleave, so stereo is accepted there.
+            let framing = parse_g726_framing_option(variant, params)?;
+            let max = if framing == G726Framing::Wav { 2 } else { 1 };
+            if channels as usize > max {
                 return Err(Error::unsupported(format!(
-                    "adpcm_g726: only mono supported (got {channels} channels)"
+                    "adpcm_g726: {channels} channels not supported ({} with framing={})",
+                    if max == 2 { "1 or 2" } else { "mono only" },
+                    if framing == G726Framing::Wav {
+                        "wav"
+                    } else {
+                        "raw"
+                    },
                 )));
             }
         }
@@ -865,6 +941,31 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // `law` codec option — G.726 log-PCM (A-law / µ-law) interface
     // per §4.2.1 / §4.2.8; `None` keeps the linear interface.
     let g726_law = parse_g726_law_option(variant, params)?;
+    // `framing` / `aux_block_size` codec options — the G.723/G.721-in-
+    // WAV container layout vs the raw bit-continuous telephony stream.
+    // The WAV layout fixes the bit order (MSB-first per the staged
+    // bit-cell grid) and carries only the documented 3-/4-/5-bit rates.
+    let g726_framing = parse_g726_framing_option(variant, params)?;
+    let g726_aux = parse_g726_aux_option(variant, g726_framing, params)?;
+    if g726_framing == G726Framing::Wav {
+        if !g726::wav_rate_supported(g726_rate) {
+            return Err(Error::unsupported(
+                "adpcm_g726: framing=wav carries only the 3-, 4- and 5-bit rates \
+                 (bits_per_sample 2 has no WAV tag)",
+            ));
+        }
+        if g726_order == g726::BitOrder::LsbFirst {
+            return Err(Error::unsupported(
+                "adpcm_g726: framing=wav fixes the sub-block bit order (MSB-first \
+                 per the bit-cell grid); bit_order=lsb is not applicable",
+            ));
+        }
+    }
+    let g726_lanes = if g726_framing == G726Framing::Wav {
+        channels as usize
+    } else {
+        1
+    };
     Ok(Box::new(AdpcmDecoder {
         codec_id: params.codec_id.clone(),
         variant,
@@ -879,10 +980,14 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
         dialogic_state: vec![dialogic::Channel::default(); channels as usize],
         g726_rate,
-        g726_state: g726::State::new(g726_rate),
+        g726_states: vec![g726::State::new(g726_rate); g726_lanes],
         g726_unpacker: g726::BitUnpacker::new(g726_order),
         g726_order,
         g726_law,
+        g726_framing,
+        g726_aux,
+        g726_block_pos: 0,
+        g726_code_carry: Vec::new(),
         eof: false,
     }))
 }
@@ -935,10 +1040,26 @@ pub struct AdpcmDecoder {
     // across packets and, at the 3- and 5-bit rates, so does a partial
     // code word (the unpacker's residual bits). The rate and in-byte
     // order are retained so `reset` re-seeds with the same options.
+    // One state per lane: a single entry for the raw telephony stream,
+    // one per channel under the WAV sub-block framing (which defines a
+    // stereo interleave; each lane is an independent codec).
     g726_rate: g726::Rate,
-    g726_state: g726::State,
+    g726_states: Vec<g726::State>,
     g726_unpacker: g726::BitUnpacker,
     g726_order: g726::BitOrder,
+    // `framing` codec option: raw bit-continuous stream (default) vs
+    // the G.723/G.721-in-WAV sub-block layout, with `aux_block_size`
+    // auxiliary bytes at the start of every `nBlockAlign` block. The
+    // byte position within the current block persists across packets so
+    // a demuxer may split blocks arbitrarily.
+    g726_framing: G726Framing,
+    g726_aux: usize,
+    g726_block_pos: usize,
+    // Codes unpacked but not yet decoded because they do not complete a
+    // whole interleave frame (stereo WAV framing only; 0..lanes-1
+    // entries). Keeps every lane's state fed in order even when a
+    // packet split lands mid-frame.
+    g726_code_carry: Vec<u8>,
     // `Some` ⇒ the G.711 log-PCM interface: each code is decoded
     // through the §4.2.8 COMPRESS + SYNC chain and the resulting law
     // word expanded back to 16-bit linear (the output PCM sits on the
@@ -948,6 +1069,25 @@ pub struct AdpcmDecoder {
 }
 
 impl AdpcmDecoder {
+    /// Remove the per-block `aux_block_size` auxiliary prefix from a
+    /// G.726 `framing=wav` payload, tracking the byte position within
+    /// the current `nBlockAlign` block across packets (a demuxer may
+    /// split blocks arbitrarily — including mid-prefix).
+    fn g726_strip_aux_incremental(&mut self, data: &[u8]) -> Vec<u8> {
+        let block = g726::wav_block_align(self.g726_rate, self.channels, self.g726_aux);
+        let mut out = Vec::with_capacity(data.len());
+        for &b in data {
+            if self.g726_block_pos >= self.g726_aux {
+                out.push(b);
+            }
+            self.g726_block_pos += 1;
+            if self.g726_block_pos == block {
+                self.g726_block_pos = 0;
+            }
+        }
+        out
+    }
+
     /// Decode a (possibly multi-block) packet of a block-oriented variant.
     ///
     /// `decode_one` decodes exactly one block (`bytes`, `channels`) into
@@ -1037,30 +1177,53 @@ impl AdpcmDecoder {
                 self.dialogic_order,
                 dialogic::Output::Wide16,
             ),
-            Variant::G726 => match self.g726_law {
-                None => {
-                    let mut out = Vec::new();
-                    g726::decode_packet(
-                        &pkt.data,
-                        &mut self.g726_state,
-                        &mut self.g726_unpacker,
-                        &mut out,
-                    );
-                    out
+            Variant::G726 => {
+                // Under the WAV sub-block framing, strip the per-block
+                // auxiliary prefix first (position persists across
+                // packets — a demuxer may split blocks arbitrarily).
+                // The remaining bytes are one continuous MSB-first
+                // code stream in both framings, round-robin across the
+                // per-lane states (a single lane for raw / mono).
+                let stripped;
+                let payload: &[u8] = if self.g726_framing == G726Framing::Wav && self.g726_aux > 0 {
+                    stripped = self.g726_strip_aux_incremental(&pkt.data);
+                    &stripped
+                } else {
+                    &pkt.data
+                };
+                let mut codes = std::mem::take(&mut self.g726_code_carry);
+                self.g726_unpacker
+                    .feed(payload, self.g726_rate.bits(), &mut codes);
+                let lanes = self.g726_states.len();
+                // Hold back codes that do not complete a whole
+                // interleave frame (possible when a stereo WAV-framing
+                // packet split lands mid-frame) so lane order survives
+                // the packet boundary.
+                let rem = codes.len() % lanes;
+                self.g726_code_carry = codes.split_off(codes.len() - rem);
+                match self.g726_law {
+                    None => codes
+                        .iter()
+                        .enumerate()
+                        .map(|(n, &c)| self.g726_states[n % lanes].decode_i16(c))
+                        .collect(),
+                    Some(law) => {
+                        // Log-PCM interface: §4.2.8 COMPRESS + SYNC per
+                        // code, then the law word expanded to 16-bit
+                        // linear (the PCM sits on the law lattice).
+                        codes
+                            .iter()
+                            .enumerate()
+                            .map(|(n, &c)| {
+                                g726::expand_i16(
+                                    self.g726_states[n % lanes].decode_law(c, law),
+                                    law,
+                                )
+                            })
+                            .collect()
+                    }
                 }
-                Some(law) => {
-                    // Log-PCM interface: §4.2.8 COMPRESS + SYNC per
-                    // code, then the law word expanded to 16-bit
-                    // linear (the PCM sits on the law lattice).
-                    let mut codes = Vec::new();
-                    self.g726_unpacker
-                        .feed(&pkt.data, self.g726_rate.bits(), &mut codes);
-                    codes
-                        .into_iter()
-                        .map(|c| g726::expand_i16(self.g726_state.decode_law(c, law), law))
-                        .collect()
-                }
-            },
+            }
         };
 
         // Interleaved i16 → little-endian bytes.
@@ -1132,8 +1295,12 @@ impl Decoder for AdpcmDecoder {
         for st in &mut self.dialogic_state {
             *st = dialogic::Channel::default();
         }
-        self.g726_state = g726::State::new(self.g726_rate);
+        for st in &mut self.g726_states {
+            *st = g726::State::new(self.g726_rate);
+        }
         self.g726_unpacker = g726::BitUnpacker::new(self.g726_order);
+        self.g726_block_pos = 0;
+        self.g726_code_carry.clear();
         Ok(())
     }
 }
