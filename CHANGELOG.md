@@ -61,6 +61,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `framing=wav` registry decoder also accepts the extension through
   `CodecParameters::extradata` (an explicit `aux_block_size` option
   wins over extradata).
+- **Variable-bit-rate switching pinned under the documented demo
+  schedule** — `tests/g726_vbr.rs` exercises `State::set_rate` under
+  the staged block-cyclic schedule (`16-24-32-40-32-24` kbit/s at a
+  256-sample period, applied cyclically and stopping mid-cycle):
+  encoder/decoder lockstep with per-block SNR floors across every
+  switch direction, §4.2.8 SYNC tandem transparency held across rate
+  switches (three synchronous stages, both laws, word-identical from
+  stage two on), and a proof that carrying the Table 6 state through a
+  switch is load-bearing (a receiver that resets at the boundary falls
+  off the encoder's trajectory).
 
 - **`WAVE_FORMAT_G723_ADPCM` (`0x0014`) alias tag for G.726** — the older
   CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates) that
