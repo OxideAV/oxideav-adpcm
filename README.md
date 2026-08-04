@@ -159,14 +159,43 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   The registry also answers to the `0x0014` (`WAVE_FORMAT_G723_ADPCM`)
   tag — the older CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit /
   40 kbit/s) that the 1990 Recommendation consolidates alongside G.721 —
-  with the rate taken from `wBitsPerSample`. For that WAV framing
-  (whole-byte sub-blocks rather than the raw bit-continuous telephony
-  stream), `g726::wav_subblock_bytes` / `wav_block_align` compute the
-  block geometry a muxer/demuxer needs (`bits·channels`-byte sub-blocks,
-  16 to a block plus `nAuxBlockSize`), reproducing the staged catalogue's
-  tabulated `nBlockAlign` rows (48 / 96 / 80 / 160). The intra-sub-block
-  bit-ordering figure did not survive in the archived catalogue, so only
-  the byte geometry is exposed, not a sub-block decoder.
+  with the rate taken from `wBitsPerSample`. Mid-stream **rate
+  switching with state carriage** (`State::set_rate` — the Appendix I.1
+  DCME property; only the quantizer tables are rate-scoped) is pinned
+  under the staged demo schedule (`16-24-32-40-32-24` kbit/s cyclic at
+  a 256-sample period), including SYNC tandem transparency held across
+  the switches.
+- **G.723/G.721-in-WAV sub-block framing (`framing=wav`)** — the WAV
+  carriage of the same codes (tags `0x0014` / `0x0040`) groups them
+  into whole-byte 8-sample-per-channel **sub-blocks** instead of the
+  raw bit-continuous telephony stream. The intra-sub-block **bit-cell
+  grid** is implemented from the staged reconstruction
+  (`docs/audio/adpcm/g72x-wav/` — codes MSB-first into a big-endian
+  bitstream, time-major channel-minor stereo interleave, anchored by
+  the archived catalogue's surviving stereo-3-bit "Byte 3" row) and
+  pinned byte-exactly against all four staged packing vectors.
+  `g726::wav_subblock_bytes` / `wav_block_align` compute the geometry
+  (`bits·channels`-byte sub-blocks, 16 to a block plus `nAuxBlockSize`,
+  reproducing the catalogue's tabulated 48 / 96 / 80 / 160 rows);
+  `wav_pack_codes` / `wav_unpack_codes` implement the grid;
+  `wav_strip_aux` removes per-block auxiliary prefixes;
+  `wav_decode_packet` / `wav_encode_packet` run per-channel §4.2 codec
+  states (the container defines a stereo interleave, so 1..=2 channels
+  — unlike the mono-only raw stream); `wav_format_extra` /
+  `wav_parse_format_extra` round-trip the one-field `fmt ` extension
+  (`nAuxBlockSize`, `cbSize = 2`), which
+  `Variant::G726.build_wave_format_extra` serialises for the six
+  aux-free documented geometries. On the registry path the `framing`
+  option (`raw` default / `wav`) selects the layout for **both**
+  factories; `aux_block_size` (or the extension via
+  `CodecParameters::extradata`; the option wins) locates the per-block
+  prefix, and block position, sub-byte bits and a lane-alignment code
+  carry all persist across packets, so a demuxer may split blocks
+  anywhere. Only the documented 3-/4-/5-bit rates are carried
+  (2-bit / 16 kbit/s has no WAV tag) and the grid fixes MSB-first
+  packing (`bit_order=lsb` is rejected). The encoder emits aux-free
+  whole sub-blocks, padding the final partial one with silence at
+  `flush`.
 
 ### Typed variant accessor
 
@@ -235,6 +264,19 @@ container and the harness pulls the raw 34-byte `ima4` blocks straight
 out of the CAF `data` chunk before feeding the decoder. Fixtures are
 generated on demand and skipped when the validator binary is absent.
 
+`tests/g726_wav_framing.rs` pins the G.723/G.721-in-WAV container
+layer: all four staged bit-cell packing vectors byte-for-byte, the
+surviving catalogue bit row re-derived independently of the packer,
+stereo lane independence, cross-packet state carriage, and the full
+registry matrix (byte-split invariance against the direct API,
+aux stripping at hostile split points, option validation, per-lane
+reset). `tests/g726_vbr.rs` pins mid-stream rate switching under the
+staged demo schedule. The structured-malformation suites add
+`framing=wav` legs — arbitrary bytes and random packet/frame chops
+(mid-prefix, mid-code, mid-frame) match whole-buffer references
+exactly and never panic — and the `decode_packet_g726` /
+`encode_packet_g726` fuzz targets carry matching sub-block legs.
+
 `tests/g726_validate.rs` runs the G.726 conformance pair: the decode
 direction feeds the validator's own G.726-in-WAV output (tag `0x0045`,
 all four rates) to our decoder and cross-correlates > 0.97 against the
@@ -287,11 +329,13 @@ harness under `fuzz/` exposes per-variant decode and encode targets:
 ## Benchmarks
 
 A Criterion harness at `benches/decode.rs` covers the per-block /
-per-packet decode hot path across all seven variants (16 scenarios,
-including the Dialogic stereo nibble-interleave path and the four
+per-packet decode hot path across all seven variants (18 scenarios,
+including the Dialogic stereo nibble-interleave path, the four
 G.726 rates — ~171 µs per decoded second at 8 kHz on the reference
 machine, so the per-sample state machine, not the code width,
-dominates). All
+dominates — and the G.726 WAV-framing stereo path, whose two lanes
+cost ~1.91× the mono raw stream: the sub-block container layer itself
+is effectively free). All
 inputs are synthesised in-bench from a deterministic seed — block
 variants build a valid buffer via the public encoder so the timed loop
 measures only the decoder. No fixtures are read.
@@ -346,7 +390,11 @@ constants (uncopyrightable facts).
   by the ITU Appendix II digital test sequences (black-box
   input→output data staged from `docs/audio/adpcm/g726/conformance/`
   into `tests/fixtures/g726/`); no reference implementation of any
-  kind was consulted.
+  kind was consulted. The G.723/G.721-in-WAV sub-block bit-cell grid
+  is transcribed from `docs/audio/adpcm/g72x-wav/` — the packing
+  convention reconstructed from the archived catalogue's surviving
+  stereo-3-bit "Byte 3" row and validated there by byte-exact packing
+  vectors, which the test suite pins in full.
 - **OKI / Dialogic VOX ADPCM** — 49-entry step table and 8-entry
   step-pointer adjustment from Dialogic Corporation's *Dialogic ADPCM
   Algorithm* application note (doc 00-1366-001, 1988). Headerless `.vox`
