@@ -45,6 +45,7 @@
 //! and 5 bits per code a code routinely straddles a byte boundary).
 
 use crate::tables;
+use oxideav_core::{Error, Result};
 
 /// G.726 operating rate — the per-sample code width.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -195,6 +196,192 @@ pub const fn wav_subblock_bytes(rate: Rate, channels: u16) -> usize {
 /// 5-bit mono / stereo.
 pub const fn wav_block_align(rate: Rate, channels: u16, aux_bytes: usize) -> usize {
     wav_subblock_bytes(rate, channels) * WAV_SUBBLOCKS_PER_BLOCK + aux_bytes
+}
+
+// ---------------------------------------------------------------------------
+// G.723 / G.721-in-WAV sub-block bit-cell codec
+// ---------------------------------------------------------------------------
+//
+// The intra-sub-block bit grid is staged at `docs/audio/adpcm/g72x-wav/`
+// (reconstructed from the packing convention plus the one surviving
+// stereo-3-bit "Byte 3" row of the archived catalogue, and pinned there
+// by byte-exact packing vectors). The convention:
+//
+//   * the 8 samples of a sub-block are taken in time order; for stereo
+//     each time index contributes a left then a right sample
+//     (AL AR BL BR … HL HR — time-major, channel-minor);
+//   * each sample's code is written MSB-first (`x2 x1 x0` at 3 bits,
+//     `x4 x3 x2 x1 x0` at 5 bits);
+//   * the resulting bitstream is sliced into bytes MSB-first.
+//
+// A sub-block is therefore always a whole number of bytes
+// ([`wav_subblock_bytes`]), and concatenated sub-blocks form one
+// continuous MSB-first bitstream — the same order [`BitPacker`] /
+// [`BitUnpacker`] produce with [`BitOrder::MsbFirst`]. What this layer
+// adds on top of the raw packers is the sub-block framing contract
+// (whole 8-sample groups per channel), the stereo interleave, and the
+// per-channel codec-state plumbing.
+
+/// Whether `rate` is a code width the G.723/G.721-in-WAV container is
+/// documented to carry: 3-bit / 24 kbit/s and 5-bit / 40 kbit/s under
+/// `WAVE_FORMAT_G723_ADPCM` (0x0014), 4-bit / 32 kbit/s under
+/// `WAVE_FORMAT_G721_ADPCM` (0x0040). The 2-bit / 16 kbit/s rate has no
+/// tag in the archived catalogue and is rejected by the `wav_*`
+/// sub-block APIs.
+pub const fn wav_rate_supported(rate: Rate) -> bool {
+    matches!(rate, Rate::R24 | Rate::R32 | Rate::R40)
+}
+
+/// Validate a (`rate`, `channels`) pair for the WAV sub-block layer.
+fn wav_check(rate: Rate, channels: usize) -> Result<()> {
+    if !wav_rate_supported(rate) {
+        return Err(Error::unsupported(format!(
+            "g726 wav framing: rate {} kbit/s not carried by the \
+             G.723/G.721-in-WAV container (3-, 4- or 5-bit only)",
+            rate.bitrate() / 1000
+        )));
+    }
+    if channels == 0 || channels > 2 {
+        return Err(Error::unsupported(format!(
+            "g726 wav framing: {channels} channels not supported (1 or 2)"
+        )));
+    }
+    Ok(())
+}
+
+/// Pack right-aligned G.726 codes into G.723/G.721-in-WAV sub-blocks
+/// per the staged bit-cell grid.
+///
+/// `codes` is time-major, channel-minor (for stereo:
+/// `AL AR BL BR … HL HR`) and must cover a whole number of sub-blocks —
+/// `8 * channels` codes each. The output is
+/// `codes.len() / 8 / channels` sub-blocks of
+/// [`wav_subblock_bytes`]`(rate, channels)` bytes. Errors on an
+/// unsupported rate / channel count or a partial sub-block.
+pub fn wav_pack_codes(codes: &[u8], rate: Rate, channels: u16) -> Result<Vec<u8>> {
+    wav_check(rate, channels as usize)?;
+    let group = 8 * channels as usize;
+    if codes.len() % group != 0 {
+        return Err(Error::invalid(format!(
+            "g726 wav framing: {} codes is not a whole number of sub-blocks \
+             ({group} codes each at {channels} channel(s))",
+            codes.len()
+        )));
+    }
+    Ok(pack_codes(codes, rate, BitOrder::MsbFirst))
+}
+
+/// Unpack G.723/G.721-in-WAV sub-blocks back into right-aligned codes —
+/// the exact inverse of [`wav_pack_codes`].
+///
+/// `data` must be a whole number of sub-blocks
+/// ([`wav_subblock_bytes`]`(rate, channels)` bytes each; any per-block
+/// auxiliary prefix must already have been stripped — see
+/// [`wav_strip_aux`]). The returned codes are time-major,
+/// channel-minor.
+pub fn wav_unpack_codes(data: &[u8], rate: Rate, channels: u16) -> Result<Vec<u8>> {
+    wav_check(rate, channels as usize)?;
+    let sub = wav_subblock_bytes(rate, channels);
+    if data.len() % sub != 0 {
+        return Err(Error::invalid(format!(
+            "g726 wav framing: {} bytes is not a whole number of {sub}-byte sub-blocks",
+            data.len()
+        )));
+    }
+    Ok(unpack_codes(data, rate, BitOrder::MsbFirst))
+}
+
+/// Strip the per-block auxiliary prefix (`nAuxBlockSize` bytes at the
+/// start of every `block_align`-byte data block) from a WAV `data`
+/// payload, leaving only sub-block bytes.
+///
+/// `block_align` is the WAV `nBlockAlign` **including** the prefix
+/// (i.e. [`wav_block_align`]`(rate, channels, aux_bytes)`). The helper
+/// is truncation-tolerant: a short trailing block keeps whatever
+/// payload follows its prefix, and a tail shorter than the prefix
+/// itself contributes nothing. `aux_bytes == 0` returns the input
+/// unchanged. Errors when `aux_bytes >= block_align` (a block with no
+/// payload cannot carry audio).
+pub fn wav_strip_aux(data: &[u8], block_align: usize, aux_bytes: usize) -> Result<Vec<u8>> {
+    if aux_bytes == 0 {
+        return Ok(data.to_vec());
+    }
+    if block_align == 0 || aux_bytes >= block_align {
+        return Err(Error::invalid(format!(
+            "g726 wav framing: aux prefix {aux_bytes} B leaves no payload in a \
+             {block_align} B block"
+        )));
+    }
+    let mut out = Vec::with_capacity(data.len() - data.len() / block_align * aux_bytes);
+    for block in data.chunks(block_align) {
+        if block.len() > aux_bytes {
+            out.extend_from_slice(&block[aux_bytes..]);
+        }
+    }
+    Ok(out)
+}
+
+/// Check that every state in a per-channel set runs at the same rate,
+/// and return it.
+fn wav_states_rate(states: &[State]) -> Result<Rate> {
+    let rate = match states.first() {
+        Some(s) => s.rate(),
+        None => return Err(Error::invalid("g726 wav framing: no channel state")),
+    };
+    if states.iter().any(|s| s.rate() != rate) {
+        return Err(Error::invalid(
+            "g726 wav framing: per-channel states disagree on the operating rate",
+        ));
+    }
+    Ok(rate)
+}
+
+/// Decode a G.723/G.721-in-WAV payload of whole sub-blocks into
+/// interleaved 16-bit PCM.
+///
+/// `states` holds one codec [`State`] per channel (1 or 2, all at the
+/// same rate) and carries across calls — the container framing groups
+/// codes into sub-blocks but the codec itself stays stream-oriented,
+/// with no per-block state reset. Any auxiliary prefix must already
+/// have been stripped ([`wav_strip_aux`]).
+pub fn wav_decode_packet(data: &[u8], states: &mut [State]) -> Result<Vec<i16>> {
+    let rate = wav_states_rate(states)?;
+    let codes = wav_unpack_codes(data, rate, states.len() as u16)?;
+    let channels = states.len();
+    let mut out = Vec::with_capacity(codes.len());
+    for (n, &code) in codes.iter().enumerate() {
+        out.push(states[n % channels].decode_i16(code));
+    }
+    Ok(out)
+}
+
+/// Encode interleaved 16-bit PCM into G.723/G.721-in-WAV sub-blocks —
+/// the inverse of [`wav_decode_packet`].
+///
+/// `pcm` is time-major, channel-minor and must cover a whole number of
+/// sub-blocks (`8 * channels` samples each); `states` holds one codec
+/// [`State`] per channel (1 or 2, all at the same rate) and carries
+/// across calls. The output carries no auxiliary prefix
+/// (`nAuxBlockSize = 0`, the catalogue's "most instances" case).
+pub fn wav_encode_packet(pcm: &[i16], states: &mut [State]) -> Result<Vec<u8>> {
+    let rate = wav_states_rate(states)?;
+    let channels = states.len();
+    // Validate the framing *before* running any sample through the
+    // codec — a partial sub-block must not advance the channel states.
+    wav_check(rate, channels)?;
+    if pcm.len() % (8 * channels) != 0 {
+        return Err(Error::invalid(format!(
+            "g726 wav framing: {} samples is not a whole number of sub-blocks \
+             ({} samples each at {channels} channel(s))",
+            pcm.len(),
+            8 * channels
+        )));
+    }
+    let mut codes = Vec::with_capacity(pcm.len());
+    for (n, &s) in pcm.iter().enumerate() {
+        codes.push(states[n % channels].encode_i16(s));
+    }
+    wav_pack_codes(&codes, rate, channels as u16)
 }
 
 // ---------------------------------------------------------------------------

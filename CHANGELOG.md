@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **G.723/G.721-in-WAV sub-block bit-cell codec** — the intra-sub-block
+  bit grid is now staged (`docs/audio/adpcm/g72x-wav/`, reconstructed
+  from the packing convention plus the surviving stereo-3-bit "Byte 3"
+  row and pinned by byte-exact packing vectors), unblocking the
+  sub-block decoder this crate previously could not offer. New
+  `g726::wav_pack_codes` / `wav_unpack_codes` implement the grid (codes
+  MSB-first into a big-endian bitstream, time-major channel-minor
+  stereo interleave, whole 8-sample-per-channel sub-blocks);
+  `g726::wav_strip_aux` removes the per-block `nAuxBlockSize` prefix;
+  `g726::wav_decode_packet` / `wav_encode_packet` run the unpacked
+  codes through per-channel §4.2 codec states (mono or stereo — the
+  container defines a two-channel interleave, unlike the raw
+  bit-continuous telephony stream); `g726::wav_rate_supported` gates
+  the layer to the documented 3-/4-/5-bit rates (2-bit / 16 kbit/s has
+  no tag in the archived catalogue). `tests/g726_wav_framing.rs` pins
+  all four staged packing vectors byte-for-byte, re-derives the
+  surviving catalogue bit row independently of the packer, and covers
+  stereo lane independence, cross-packet state carriage and
+  failed-call state-purity.
+
 - **`WAVE_FORMAT_G723_ADPCM` (`0x0014`) alias tag for G.726** — the older
   CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates) that
   the 1990 G.726 Recommendation consolidates alongside G.721 now routes
