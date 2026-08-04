@@ -40,6 +40,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   lane-alignment code carry all persist across packets, so a demuxer
   may split blocks anywhere (including mid-prefix and mid-frame).
   `reset` re-seeds every lane plus the framing cursors.
+- **`framing=wav` on the G.726 registry encoder** — the encode side of
+  the same container layout: whole 8-sample-per-channel sub-blocks
+  (partial frames buffer lane-aligned across `send_frame` calls;
+  `flush` pads the final sub-block with silence so the stream stays the
+  shape every G.723/G.721-in-WAV reader expects), stereo per-lane
+  states, aux-free blocks (`aux_block_size` must be 0 on encode), and
+  the same rate / bit-order gates as the decoder. The emitted bytes are
+  chop-invariant and byte-identical to `g726::wav_encode_packet`; the
+  G.711 log-PCM `law` interface composes with the WAV framing on both
+  sides.
 
 - **`WAVE_FORMAT_G723_ADPCM` (`0x0014`) alias tag for G.726** — the older
   CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates) that

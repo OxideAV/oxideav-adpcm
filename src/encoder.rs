@@ -1381,15 +1381,45 @@ impl Encoder for YamahaAEncoder {
 /// byte.
 pub struct G726Encoder {
     output_params: CodecParameters,
-    state: g726::State,
+    // One codec state per lane: a single entry for the raw telephony
+    // stream (mono only), one per channel under the G.723/G.721-in-WAV
+    // sub-block framing (`framing=wav`, 1..=2 channels — each lane is
+    // an independent Rec. G.726 §4.2 codec).
+    states: Vec<g726::State>,
     packer: g726::BitPacker,
     // `Some` ⇒ the G.711 log-PCM interface: input samples are
     // companded to law words and encoded through the §4.2.1 EXPAND
     // front-end. `None` ⇒ the linear interface.
     law: Option<g726::Law>,
+    // `framing=wav`: emit whole 8-sample-per-channel sub-blocks; the
+    // interleaved remainder waits in `buf` (always lane-aligned) until
+    // the next frame or `flush`, which pads the final partial
+    // sub-block with silence.
+    wav_framing: bool,
+    buf: Vec<i16>,
     pending: VecDeque<Packet>,
     samples_emitted: i64,
     flushed: bool,
+}
+
+impl G726Encoder {
+    /// Encode interleaved samples through the per-lane states and the
+    /// shared bit packer. Callers guarantee lane alignment
+    /// (`pcm.len() % lanes == 0`).
+    fn encode_interleaved(&mut self, pcm: &[i16]) -> Vec<u8> {
+        let lanes = self.states.len();
+        let bits = self.states[0].rate().bits();
+        let mut out = Vec::with_capacity((pcm.len() * bits as usize).div_ceil(8));
+        for (n, &s) in pcm.iter().enumerate() {
+            let st = &mut self.states[n % lanes];
+            let code = match self.law {
+                None => st.encode_i16(s),
+                Some(law) => st.encode_law(g726::compress_i16(s, law), law),
+            };
+            self.packer.push(code as u32, bits, &mut out);
+        }
+        out
+    }
 }
 
 impl Encoder for G726Encoder {
@@ -1404,30 +1434,29 @@ impl Encoder for G726Encoder {
             Frame::Audio(a) => a,
             _ => return Err(Error::invalid("adpcm_g726 encoder: expected audio frame")),
         };
+        let lanes = self.states.len();
         let mut pcm: Vec<i16> = Vec::new();
-        push_audio_frame_pcm(&mut pcm, af, 1)?;
+        push_audio_frame_pcm(&mut pcm, af, lanes)?;
         if pcm.is_empty() {
             return Ok(());
         }
-        let n_samples = pcm.len() as i64;
-        let bytes = match self.law {
-            None => g726::encode_packet(&pcm, &mut self.state, &mut self.packer),
-            Some(law) => {
-                let mut out =
-                    Vec::with_capacity((pcm.len() * self.state.rate().bits() as usize).div_ceil(8));
-                for &s in &pcm {
-                    let code = self.state.encode_law(g726::compress_i16(s, law), law);
-                    self.packer
-                        .push(code as u32, self.state.rate().bits(), &mut out);
-                }
-                out
-            }
+        let bytes = if self.wav_framing {
+            // Emit only whole sub-blocks (8 samples per channel); the
+            // lane-aligned remainder waits in `buf`.
+            self.buf.extend_from_slice(&pcm);
+            let group = 8 * lanes;
+            let whole = self.buf.len() - self.buf.len() % group;
+            let ready: Vec<i16> = self.buf.drain(..whole).collect();
+            self.encode_interleaved(&ready)
+        } else {
+            self.encode_interleaved(&pcm)
         };
         let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
         let pts = self.samples_emitted;
-        self.samples_emitted += n_samples;
-        // At sub-byte rates a short frame may complete no whole byte —
-        // the codes stay buffered in the packer and ride out with the
+        self.samples_emitted += (pcm.len() / lanes) as i64;
+        // At sub-byte rates (raw framing) a short frame may complete no
+        // whole byte, and under the WAV framing a short frame may
+        // complete no whole sub-block — the residue rides out with the
         // next frame (or `flush`), so no empty packet is emitted.
         if !bytes.is_empty() {
             self.pending
@@ -1445,9 +1474,19 @@ impl Encoder for G726Encoder {
         Err(Error::NeedMore)
     }
     fn flush(&mut self) -> Result<()> {
-        // Zero-pad and emit any residual sub-byte bits as a final
-        // one-byte packet.
         let mut tail = Vec::new();
+        if self.wav_framing && !self.buf.is_empty() {
+            // Pad the final partial sub-block with silence so the
+            // stream stays a whole number of sub-blocks — the shape
+            // every G.723/G.721-in-WAV reader expects. The packer ends
+            // byte-aligned by construction.
+            let lanes = self.states.len();
+            let group = 8 * lanes;
+            let mut last: Vec<i16> = self.buf.drain(..).collect();
+            last.resize(group, 0);
+            tail = self.encode_interleaved(&last);
+        }
+        // Raw framing: zero-pad and emit any residual sub-byte bits.
         self.packer.flush(&mut tail);
         if !tail.is_empty() {
             let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(8000) as i64);
@@ -1609,10 +1648,28 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             }))
         }
         crate::CODEC_ID_G726 => {
-            if channels != 1 {
+            // `framing` codec option — raw bit-continuous telephony
+            // stream (default, mono only) vs the G.723/G.721-in-WAV
+            // sub-block layout (1..=2 channels; the container defines a
+            // stereo interleave). Mirrors the decoder factory.
+            let framing = crate::decoder::parse_g726_framing_option(crate::Variant::G726, params)?;
+            let wav_framing = framing == crate::decoder::G726Framing::Wav;
+            let max = if wav_framing { 2 } else { 1 };
+            if channels as usize > max || channels == 0 {
                 return Err(Error::unsupported(format!(
-                    "adpcm_g726 encoder: only mono supported (got {channels} channels)"
+                    "adpcm_g726 encoder: {channels} channels not supported ({} with framing={})",
+                    if max == 2 { "1 or 2" } else { "mono only" },
+                    if wav_framing { "wav" } else { "raw" },
                 )));
+            }
+            // The encoder emits aux-free blocks (`nAuxBlockSize = 0`,
+            // the catalogue's "most instances" case); a non-zero
+            // `aux_block_size` therefore only makes sense on decode.
+            if crate::decoder::parse_g726_aux_option(crate::Variant::G726, framing, params)? != 0 {
+                return Err(Error::unsupported(
+                    "adpcm_g726 encoder: aux_block_size must be 0 — the encoder emits \
+                     aux-free WAV blocks",
+                ));
             }
             // `bits_per_sample` codec option selects the operating rate
             // (2/3/4/5 bits = 16/24/32/40 kbit/s; default 4 = 32 kbit/s),
@@ -1633,17 +1690,34 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 })?;
             }
             let order = crate::decoder::parse_g726_order_option(crate::Variant::G726, params)?;
+            if wav_framing {
+                if !g726::wav_rate_supported(rate) {
+                    return Err(Error::unsupported(
+                        "adpcm_g726 encoder: framing=wav carries only the 3-, 4- and 5-bit \
+                         rates (bits_per_sample 2 has no WAV tag)",
+                    ));
+                }
+                if order == g726::BitOrder::LsbFirst {
+                    return Err(Error::unsupported(
+                        "adpcm_g726 encoder: framing=wav fixes the sub-block bit order \
+                         (MSB-first per the bit-cell grid); bit_order=lsb is not applicable",
+                    ));
+                }
+            }
             // `law` codec option — with `alaw` / `ulaw` the encoder
             // speaks the Recommendation's G.711 log-PCM interface:
             // each 16-bit sample is companded to a law word and fed
             // through the §4.2.1 EXPAND front-end (mirrored by the
             // decoder factory's COMPRESS + SYNC output chain).
             let law = crate::decoder::parse_g726_law_option(crate::Variant::G726, params)?;
+            let lanes = if wav_framing { channels as usize } else { 1 };
             Ok(Box::new(G726Encoder {
                 output_params: params.clone(),
-                state: g726::State::new(rate),
+                states: vec![g726::State::new(rate); lanes],
                 packer: g726::BitPacker::new(order),
                 law,
+                wav_framing,
+                buf: Vec::new(),
                 pending: VecDeque::new(),
                 samples_emitted: 0,
                 flushed: false,

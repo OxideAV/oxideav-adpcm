@@ -442,6 +442,121 @@ fn registry_wav_option_validation() {
     assert!(reg.first_decoder(&ms).is_err());
 }
 
+/// Drive interleaved PCM through the registry encoder in
+/// `frame_len`-frame chunks (interleaved samples = frames × channels)
+/// and collect the emitted bytes including the flush tail.
+fn registry_encode(p: &CodecParameters, pcm: &[i16], frame_len: usize) -> Vec<u8> {
+    let reg = registry();
+    let channels = p.channels.unwrap_or(1) as usize;
+    let mut enc = reg.first_encoder(p).expect("encoder factory");
+    let mut bytes = Vec::new();
+    for chunk in pcm.chunks(frame_len * channels) {
+        let mut data = Vec::with_capacity(chunk.len() * 2);
+        for s in chunk {
+            data.extend_from_slice(&s.to_le_bytes());
+        }
+        enc.send_frame(&Frame::Audio(oxideav_core::AudioFrame {
+            samples: (chunk.len() / channels) as u32,
+            pts: None,
+            data: vec![data],
+        }))
+        .expect("send_frame");
+        while let Ok(pkt) = enc.receive_packet() {
+            bytes.extend_from_slice(&pkt.data);
+        }
+    }
+    enc.flush().expect("flush");
+    while let Ok(pkt) = enc.receive_packet() {
+        bytes.extend_from_slice(&pkt.data);
+    }
+    bytes
+}
+
+#[test]
+fn registry_wav_encoder_matches_direct_api() {
+    // Whatever the frame chop, the registry encoder must emit the exact
+    // byte stream of the direct wav_encode_packet API (sub-block
+    // buffering is invisible on the wire).
+    for &(rate, bits) in &[(Rate::R24, "3"), (Rate::R32, "4"), (Rate::R40, "5")] {
+        for channels in 1u16..=2 {
+            let frames = 512usize;
+            let pcm = sine(frames * channels as usize, 730.0, 12000.0, 0.2);
+            let mut direct: Vec<State> = (0..channels).map(|_| State::new(rate)).collect();
+            let want = wav_encode_packet(&pcm, &mut direct).unwrap();
+            for frame_len in [frames, 160, 7] {
+                let got = registry_encode(&wav_params(channels, bits, &[]), &pcm, frame_len);
+                assert_eq!(
+                    got, want,
+                    "rate {rate:?} ch {channels} frame_len {frame_len}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn registry_wav_full_round_trip_with_flush_padding() {
+    // A frame count that is NOT a multiple of 8 forces the flush path
+    // to pad the last sub-block with silence; the decode must return
+    // the padded frame count and track the input over the real frames.
+    let frames = 1000usize; // 125 sub-blocks per lane
+    let pcm = sine(frames, 350.0, 12000.0, 0.0);
+    let p = wav_params(1, "4", &[]);
+    let bytes = registry_encode(&p, &pcm, 96);
+    let padded = frames.div_ceil(8) * 8;
+    assert_eq!(bytes.len(), padded / 8 * wav_subblock_bytes(Rate::R32, 1));
+    let out = registry_decode(&p, &bytes, 11);
+    assert_eq!(out.len(), padded);
+    assert!(correlation(&pcm, &out[..frames]) > 0.9);
+}
+
+#[test]
+fn registry_wav_law_interface_round_trips() {
+    // The G.711 log-PCM interface composes with the WAV framing: the
+    // per-code codec path is unchanged, only the container transform
+    // differs. Stereo + A-law at the 5-bit rate as the worst case.
+    let frames = 1024usize;
+    let left = sine(frames, 300.0, 12000.0, 0.0);
+    let right = sine(frames, 800.0, 9000.0, 0.7);
+    let mut pcm = Vec::with_capacity(2 * frames);
+    for i in 0..frames {
+        pcm.push(left[i]);
+        pcm.push(right[i]);
+    }
+    let p = wav_params(2, "5", &[("law", "alaw")]);
+    let bytes = registry_encode(&p, &pcm, 128);
+    let out = registry_decode(&p, &bytes, 9);
+    assert_eq!(out.len(), pcm.len());
+    let out_l: Vec<i16> = out.iter().step_by(2).copied().collect();
+    let out_r: Vec<i16> = out.iter().skip(1).step_by(2).copied().collect();
+    assert!(correlation(&left, &out_l) > 0.9, "left lane");
+    assert!(correlation(&right, &out_r) > 0.9, "right lane");
+}
+
+#[test]
+fn registry_wav_encoder_option_validation() {
+    let reg = registry();
+    // Mirrors of the decoder factory gates.
+    assert!(reg.first_encoder(&wav_params(1, "2", &[])).is_err());
+    assert!(reg
+        .first_encoder(&wav_params(1, "4", &[("bit_order", "lsb")]))
+        .is_err());
+    assert!(reg.first_encoder(&wav_params(3, "4", &[])).is_err());
+    assert!(reg.first_encoder(&wav_params(2, "4", &[])).is_ok());
+    // Raw framing stays mono-only on the encode side too.
+    let mut raw_stereo = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
+    raw_stereo.sample_rate = Some(8000);
+    raw_stereo.channels = Some(2);
+    assert!(reg.first_encoder(&raw_stereo).is_err());
+    // The encoder emits aux-free blocks: aux_block_size must be 0.
+    assert!(reg
+        .first_encoder(&wav_params(1, "4", &[("aux_block_size", "4")]))
+        .is_err());
+    assert!(reg
+        .first_encoder(&wav_params(1, "4", &[("aux_block_size", "0")]))
+        .is_ok());
+}
+
 #[test]
 fn codec_entry_points_validate_states() {
     // Empty state set.
