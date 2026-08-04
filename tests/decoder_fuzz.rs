@@ -839,6 +839,75 @@ fn g726_registry_path_random_packets_match_one_shot_decode() {
     }
 }
 
+/// The `framing=wav` registry path shares the contract: arbitrary
+/// bytes, arbitrary packet chops (mid-prefix, mid-code, mid-frame),
+/// mono and stereo, with and without an aux prefix — never a panic,
+/// and the emitted PCM matches the whole-buffer reference (codes
+/// truncated to whole interleave frames; the lane-alignment carry
+/// holds back the rest).
+#[test]
+fn g726_wav_framing_registry_random_packets_match_reference() {
+    let mut lcg = Lcg::new(0xD726_0011);
+    let mut reg = CodecRegistry::new();
+    register_codecs(&mut reg);
+    for bits in ["3", "4", "5"] {
+        for channels in 1u16..=2 {
+            for aux in [0usize, 5] {
+                let rate = g726::Rate::from_bits(bits.parse().unwrap()).unwrap();
+                let block = g726::wav_block_align(rate, channels, aux);
+                // ~2.4 blocks, deliberately NOT a whole number of
+                // blocks or sub-blocks.
+                let mut payload = vec![0u8; block * 2 + block / 3 + 1];
+                lcg.fill(&mut payload);
+
+                // Whole-buffer reference through the direct helpers.
+                let stripped = g726::wav_strip_aux(&payload, block, aux).unwrap();
+                let mut un = g726::BitUnpacker::new(g726::BitOrder::MsbFirst);
+                let mut codes = Vec::new();
+                un.feed(&stripped, rate.bits(), &mut codes);
+                codes.truncate(codes.len() - codes.len() % channels as usize);
+                let mut lanes: Vec<g726::State> =
+                    (0..channels).map(|_| g726::State::new(rate)).collect();
+                let reference: Vec<i16> = codes
+                    .iter()
+                    .enumerate()
+                    .map(|(n, &c)| lanes[n % channels as usize].decode_i16(c))
+                    .collect();
+
+                // Registry path with random packet chops.
+                let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
+                params.sample_rate = Some(8_000);
+                params.channels = Some(channels);
+                params.options.insert("bits_per_sample", bits);
+                params.options.insert("framing", "wav");
+                params
+                    .options
+                    .insert("aux_block_size", aux.to_string().as_str());
+                let mut dec = reg.first_decoder(&params).expect("decoder factory");
+                let tb = TimeBase::new(1, 8_000);
+                let mut got = Vec::new();
+                let mut off = 0usize;
+                while off < payload.len() {
+                    let len = 1 + (lcg.next_u8() as usize % 13);
+                    let end = (off + len).min(payload.len());
+                    dec.send_packet(&Packet::new(0, tb, payload[off..end].to_vec()))
+                        .expect("wav framing rejects no byte pattern");
+                    if let Ok(oxideav_core::Frame::Audio(af)) = dec.receive_frame() {
+                        for pair in af.data[0].chunks_exact(2) {
+                            got.push(i16::from_le_bytes([pair[0], pair[1]]));
+                        }
+                    }
+                    off = end;
+                }
+                assert_eq!(
+                    got, reference,
+                    "bits={bits} ch={channels} aux={aux}: wav registry path diverged"
+                );
+            }
+        }
+    }
+}
+
 /// Law-domain front-end equivalence: `encode_law` is exactly
 /// `encode_step` composed with the §4.2.1 EXPAND conversion, for every
 /// possible law code word, at every rate, from a randomized state — so

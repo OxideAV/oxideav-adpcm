@@ -17,7 +17,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_adpcm::g726::{
-    decode_packet, encode_packet, BitOrder, BitPacker, BitUnpacker, Rate, State,
+    decode_packet, encode_packet, wav_decode_packet, wav_encode_packet, wav_subblock_bytes,
+    BitOrder, BitPacker, BitUnpacker, Rate, State,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -77,4 +78,35 @@ fuzz_target!(|data: &[u8]| {
         decoded.len() >= pcm.len(),
         "decode produced fewer samples than encoded"
     );
+
+    // --- G.723/G.721-in-WAV sub-block framing leg -----------------------
+    // Encode the same PCM (truncated to whole 8-sample-per-channel
+    // sub-blocks) through the WAV layer: length is exact, a frame split
+    // at a sub-block boundary is wire-invariant, and the bytes decode
+    // back to the same sample count.
+    let wav_rate = if rate == Rate::R16 { Rate::R24 } else { rate };
+    let channels = 1 + ((data[0] >> 4) & 1) as usize;
+    let group = 8 * channels;
+    let whole = pcm.len() / group * group;
+    if whole == 0 {
+        return;
+    }
+    let wav_pcm = &pcm[..whole];
+    let mut enc: Vec<State> = (0..channels).map(|_| State::new(wav_rate)).collect();
+    let bytes_w = wav_encode_packet(wav_pcm, &mut enc).expect("whole sub-blocks encode");
+    let sub = wav_subblock_bytes(wav_rate, channels as u16);
+    assert_eq!(bytes_w.len(), whole / group * sub, "wav packed length");
+
+    let cut = (split_sel % (whole / group + 1)) * group;
+    let mut enc2: Vec<State> = (0..channels).map(|_| State::new(wav_rate)).collect();
+    let mut bytes_split = wav_encode_packet(&wav_pcm[..cut], &mut enc2).unwrap();
+    bytes_split.extend_from_slice(&wav_encode_packet(&wav_pcm[cut..], &mut enc2).unwrap());
+    assert_eq!(
+        bytes_w, bytes_split,
+        "sub-block frame split changed the wire"
+    );
+
+    let mut dec: Vec<State> = (0..channels).map(|_| State::new(wav_rate)).collect();
+    let back = wav_decode_packet(&bytes_w, &mut dec).unwrap();
+    assert_eq!(back.len(), whole, "wav round trip lost samples");
 });

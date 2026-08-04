@@ -71,6 +71,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stage two on), and a proof that carrying the Table 6 state through a
   switch is load-bearing (a receiver that resets at the boundary falls
   off the encoder's trajectory).
+- **WAV-framing hostile-input coverage** — the structured-malformation
+  suites gain `framing=wav` legs: arbitrary bytes through the registry
+  decoder under every rate × channel × aux combination with random
+  packet chops (mid-prefix, mid-code, mid-frame) match the
+  whole-buffer reference exactly and never panic; full-range noise
+  through the registry encoder under random frame chops stays
+  byte-identical to the direct API including the silence-padded flush
+  tail. The coverage-guided `decode_packet_g726` / `encode_packet_g726`
+  fuzz targets grew matching sub-block legs (split transparency at
+  sub-block boundaries, ragged-tail rejects, aux-stripping bounds);
+  both ran bounded coverage-guided sessions (~1.4M / ~2.6M execs) with
+  zero findings.
 
 - **`WAVE_FORMAT_G723_ADPCM` (`0x0014`) alias tag for G.726** — the older
   CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates) that

@@ -16,7 +16,10 @@
 //! codec has no syntax to violate), so the assertions are exact.
 
 use libfuzzer_sys::fuzz_target;
-use oxideav_adpcm::g726::{decode_packet, BitOrder, BitUnpacker, Law, Rate, State};
+use oxideav_adpcm::g726::{
+    decode_packet, wav_block_align, wav_decode_packet, wav_strip_aux, wav_subblock_bytes, BitOrder,
+    BitUnpacker, Law, Rate, State,
+};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {
@@ -72,4 +75,43 @@ fuzz_target!(|data: &[u8]| {
     un3.feed(payload, rate.bits(), &mut codes);
     let law_out: Vec<u8> = codes.iter().map(|&c| st3.decode_law(c, law)).collect();
     assert_eq!(law_out.len(), whole.len(), "law path sample count diverged");
+
+    // --- G.723/G.721-in-WAV sub-block framing leg -----------------------
+    // The WAV container carries only the 3-/4-/5-bit rates; fold R16
+    // onto R24 so every input exercises the leg. Channel count and the
+    // per-block aux prefix come from the selector bytes.
+    let wav_rate = if rate == Rate::R16 { Rate::R24 } else { rate };
+    let channels = 1 + ((data[0] >> 4) & 1) as usize;
+    let aux = (data[1] & 7) as usize;
+
+    // Aux stripping never panics and never grows the payload.
+    let block = wav_block_align(wav_rate, channels as u16, aux);
+    if let Ok(payload_only) = wav_strip_aux(payload, block, aux) {
+        assert!(payload_only.len() <= payload.len());
+
+        // Decode a whole-sub-block prefix; split at a sub-block
+        // boundary must be state-transparent.
+        let sub = wav_subblock_bytes(wav_rate, channels as u16);
+        let whole_subs = payload_only.len() / sub * sub;
+        let subs = &payload_only[..whole_subs];
+        let mut states: Vec<State> = (0..channels).map(|_| State::new(wav_rate)).collect();
+        let one = wav_decode_packet(subs, &mut states).expect("whole sub-blocks decode");
+        assert_eq!(
+            one.len(),
+            whole_subs / sub * 8 * channels,
+            "wav framing sample count drifted"
+        );
+
+        let cut = (data[1] as usize % (whole_subs / sub + 1)) * sub;
+        let mut states2: Vec<State> = (0..channels).map(|_| State::new(wav_rate)).collect();
+        let mut two = wav_decode_packet(&subs[..cut], &mut states2).unwrap();
+        two.extend_from_slice(&wav_decode_packet(&subs[cut..], &mut states2).unwrap());
+        assert_eq!(one, two, "sub-block split changed the wav decode");
+
+        // A ragged tail (not a whole sub-block) must error, not panic.
+        if payload_only.len() != whole_subs {
+            let mut states3: Vec<State> = (0..channels).map(|_| State::new(wav_rate)).collect();
+            assert!(wav_decode_packet(&payload_only, &mut states3).is_err());
+        }
+    }
 });

@@ -601,6 +601,75 @@ fn g726_encoder_dc_extremes_converge_without_overflow() {
     }
 }
 
+/// Full-range noise through the `framing=wav` registry encoder under
+/// pseudo-random frame chops: never a panic, whole-sub-block output
+/// (mono and stereo), byte-identical to the direct `wav_encode_packet`
+/// once flush pads the ragged tail with silence.
+#[test]
+fn g726_wav_framing_registry_encoder_random_frames_match_direct() {
+    use oxideav_adpcm::{g726, CODEC_ID_G726};
+    use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame};
+    let mut rng = Lcg::new(0x00FA_0730u64);
+    let mut reg = CodecRegistry::new();
+    oxideav_adpcm::register_codecs(&mut reg);
+    for bits in ["3", "4", "5"] {
+        for channels in 1u16..=2 {
+            let rate = g726::Rate::from_bits(bits.parse().unwrap()).unwrap();
+            let frames = 731usize; // NOT a multiple of 8 — flush pads
+            let mut pcm = rng.pcm(frames * channels as usize);
+            pcm[0] = i16::MAX;
+            pcm[1] = i16::MIN;
+
+            // Direct reference: same PCM padded to a whole sub-block
+            // with silence, encoded in one call.
+            let group = 8 * channels as usize;
+            let mut padded = pcm.clone();
+            padded.resize(pcm.len().div_ceil(group) * group, 0);
+            let mut states: Vec<g726::State> =
+                (0..channels).map(|_| g726::State::new(rate)).collect();
+            let want = g726::wav_encode_packet(&padded, &mut states).unwrap();
+
+            let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
+            params.sample_rate = Some(8_000);
+            params.channels = Some(channels);
+            params.options.insert("bits_per_sample", bits);
+            params.options.insert("framing", "wav");
+            let mut enc = reg.first_encoder(&params).expect("encoder factory");
+            let mut got = Vec::new();
+            let mut off = 0usize;
+            while off < pcm.len() {
+                // 1..=29 whole interleave frames per send (pcm.len()
+                // and off are always frame-aligned, so `end` is too).
+                let take_frames = 1 + (rng.next_i16() as u8 as usize % 29);
+                let end = (off + take_frames * channels as usize).min(pcm.len());
+                let chunk = &pcm[off..end];
+                let mut data = Vec::with_capacity(chunk.len() * 2);
+                for s in chunk {
+                    data.extend_from_slice(&s.to_le_bytes());
+                }
+                enc.send_frame(&Frame::Audio(AudioFrame {
+                    samples: (chunk.len() / channels as usize) as u32,
+                    pts: None,
+                    data: vec![data],
+                }))
+                .expect("send_frame");
+                while let Ok(pkt) = enc.receive_packet() {
+                    got.extend_from_slice(&pkt.data);
+                }
+                off = end;
+            }
+            enc.flush().expect("flush");
+            while let Ok(pkt) = enc.receive_packet() {
+                got.extend_from_slice(&pkt.data);
+            }
+            assert_eq!(
+                got, want,
+                "bits={bits} ch={channels}: wav registry encoder diverged"
+            );
+        }
+    }
+}
+
 /// The registry-path encoder mirrors the direct API byte-for-byte under
 /// pseudo-random frame sizes (the packer's sub-byte residue crosses
 /// `send_frame` calls), and its flush emits the zero-padded tail.
