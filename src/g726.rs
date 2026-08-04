@@ -321,6 +321,26 @@ pub fn wav_strip_aux(data: &[u8], block_align: usize, aux_bytes: usize) -> Resul
     Ok(out)
 }
 
+/// Serialise the G.723/G.721-in-WAV `fmt ` chunk extension.
+///
+/// The archived catalogue's `WAVEFORMATEX` form carries exactly one
+/// extra field: `nAuxBlockSize`, the per-block auxiliary byte count
+/// (`cbSize = 2`). Per the crate's extradata convention the leading
+/// `cbSize` word is excluded — the muxer prepends `cbSize = 2`.
+pub fn wav_format_extra(aux_block_size: u16) -> [u8; 2] {
+    aux_block_size.to_le_bytes()
+}
+
+/// Parse the G.723/G.721-in-WAV `fmt ` chunk extension — the inverse
+/// of [`wav_format_extra`]. Returns `None` unless `extra` is exactly
+/// the catalogue's one-field, 2-byte form.
+pub fn wav_parse_format_extra(extra: &[u8]) -> Option<u16> {
+    match extra {
+        [lo, hi] => Some(u16::from_le_bytes([*lo, *hi])),
+        _ => None,
+    }
+}
+
 /// Check that every state in a per-channel set runs at the same rate,
 /// and return it.
 fn wav_states_rate(states: &[State]) -> Result<Rate> {

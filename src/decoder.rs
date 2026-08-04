@@ -582,6 +582,29 @@ impl Variant {
     ///   [`Self::samples_per_block`] is `None` (invalid block geometry —
     ///   bad channel count, too-small block, or off-boundary body length).
     pub fn build_wave_format_extra(self, channels: u16, block_align: usize) -> Option<Vec<u8>> {
+        // G.726 in a WAV container (tags 0x0040 / 0x0014) is the one
+        // stream-shaped variant with a `fmt ` extension: the single
+        // `nAuxBlockSize` field. Only the aux-free form is derivable
+        // from (channels, block_align) alone — `nBlockAlign` must then
+        // be exactly 16 sub-blocks of `bits · channels` bytes at a
+        // documented rate (48 / 96, 64 / 128, 80 / 160). A non-zero
+        // aux prefix is ambiguous against a higher rate, so any other
+        // geometry returns `None` (serialise it directly with
+        // [`g726::wav_format_extra`] instead).
+        if self == Variant::G726 {
+            if channels == 0 || channels > 2 {
+                return None;
+            }
+            let per = block_align / (16 * channels as usize);
+            if per * 16 * channels as usize != block_align {
+                return None;
+            }
+            let rate = g726::Rate::from_bits(u8::try_from(per).ok()?)?;
+            if !g726::wav_rate_supported(rate) {
+                return None;
+            }
+            return Some(g726::wav_format_extra(0).to_vec());
+        }
         let spb = self.samples_per_block(channels, block_align)?;
         // wSamplesPerBlock is a u16 field on the wire; an out-of-range
         // block geometry has no valid header form.
@@ -946,7 +969,16 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // The WAV layout fixes the bit order (MSB-first per the staged
     // bit-cell grid) and carries only the documented 3-/4-/5-bit rates.
     let g726_framing = parse_g726_framing_option(variant, params)?;
-    let g726_aux = parse_g726_aux_option(variant, g726_framing, params)?;
+    let mut g726_aux = parse_g726_aux_option(variant, g726_framing, params)?;
+    // With no explicit `aux_block_size` option, a WAV demuxer may hand
+    // the `fmt ` extension through `extradata` instead — the
+    // catalogue's one-field `nAuxBlockSize` form. An explicit option
+    // wins over extradata.
+    if g726_framing == G726Framing::Wav && params.options.get("aux_block_size").is_none() {
+        if let Some(aux) = g726::wav_parse_format_extra(&params.extradata) {
+            g726_aux = aux as usize;
+        }
+    }
     if g726_framing == G726Framing::Wav {
         if !g726::wav_rate_supported(g726_rate) {
             return Err(Error::unsupported(

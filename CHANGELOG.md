@@ -50,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   chop-invariant and byte-identical to `g726::wav_encode_packet`; the
   G.711 log-PCM `law` interface composes with the WAV framing on both
   sides.
+- **G.723/G.721-in-WAV `fmt ` extension serialisation** —
+  `g726::wav_format_extra` / `wav_parse_format_extra` round-trip the
+  catalogue's one-field extension (`nAuxBlockSize`, `cbSize = 2`;
+  the leading `cbSize` word excluded per the crate's extradata
+  convention). `Variant::G726.build_wave_format_extra(channels,
+  block_align)` now serialises the aux-free form when `nBlockAlign` is
+  exactly 16 documented-rate sub-blocks (48 / 96, 64 / 128, 80 / 160)
+  instead of always `None`; ambiguous geometries still return `None`.
+  The `framing=wav` registry decoder also accepts the extension through
+  `CodecParameters::extradata` (an explicit `aux_block_size` option
+  wins over extradata).
 
 - **`WAVE_FORMAT_G723_ADPCM` (`0x0014`) alias tag for G.726** — the older
   CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates) that

@@ -557,6 +557,82 @@ fn registry_wav_encoder_option_validation() {
         .is_ok());
 }
 
+// ---------------------------------------------------------------------------
+// `fmt ` chunk extension (nAuxBlockSize)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn wav_format_extra_round_trips() {
+    for aux in [0u16, 1, 4, 255, 0xABCD] {
+        let ser = g726::wav_format_extra(aux);
+        assert_eq!(g726::wav_parse_format_extra(&ser), Some(aux));
+    }
+    // Only the catalogue's exact one-field, 2-byte form parses.
+    assert_eq!(g726::wav_parse_format_extra(&[]), None);
+    assert_eq!(g726::wav_parse_format_extra(&[0]), None);
+    assert_eq!(g726::wav_parse_format_extra(&[0, 0, 0]), None);
+}
+
+#[test]
+fn variant_builds_wav_format_extra_for_aux_free_geometry() {
+    use oxideav_adpcm::Variant;
+    // The six documented aux-free nBlockAlign values (3-/4-/5-bit,
+    // mono/stereo) serialise the one-field extension with aux = 0.
+    for (ch, ba) in [(1, 48), (2, 96), (1, 64), (2, 128), (1, 80), (2, 160)] {
+        assert_eq!(
+            Variant::G726.build_wave_format_extra(ch, ba),
+            Some(vec![0, 0]),
+            "ch {ch} block_align {ba}"
+        );
+    }
+    // Anything else — off-grid sizes, the tag-less 2-bit rate, bad
+    // channel counts — has no unambiguous serialisation.
+    for (ch, ba) in [
+        (1, 47),
+        (1, 50),
+        (1, 32),
+        (2, 48),
+        (3, 144),
+        (1, 0),
+        (0, 48),
+    ] {
+        assert_eq!(
+            Variant::G726.build_wave_format_extra(ch, ba),
+            None,
+            "ch {ch} block_align {ba}"
+        );
+    }
+}
+
+#[test]
+fn registry_wav_decoder_reads_aux_from_extradata() {
+    let rate = Rate::R24;
+    let aux = 4usize;
+    let pcm = sine(2 * 128, 410.0, 12000.0, 0.0);
+    let mut enc = [State::new(rate)];
+    let payload = wav_encode_packet(&pcm, &mut enc).unwrap();
+    let mut data = Vec::new();
+    for chunk in payload.chunks(48) {
+        data.extend_from_slice(&[0x55; 4]);
+        data.extend_from_slice(chunk);
+    }
+
+    let mut direct = [State::new(rate)];
+    let want = wav_decode_packet(&payload, &mut direct).unwrap();
+
+    // The demuxer hands the fmt extension through extradata: no
+    // aux_block_size option, nAuxBlockSize = 4 on the wire.
+    let mut p = wav_params(1, "3", &[]);
+    p.extradata = g726::wav_format_extra(aux as u16).to_vec();
+    assert_eq!(registry_decode(&p, &data, 13), want);
+
+    // An explicit option wins over extradata: aux_block_size=0 with a
+    // 4-byte extradata field decodes the aux-free payload unchanged.
+    let mut p0 = wav_params(1, "3", &[("aux_block_size", "0")]);
+    p0.extradata = g726::wav_format_extra(aux as u16).to_vec();
+    assert_eq!(registry_decode(&p0, &payload, 13), want);
+}
+
 #[test]
 fn codec_entry_points_validate_states() {
     // Empty state set.
