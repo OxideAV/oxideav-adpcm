@@ -519,6 +519,33 @@ fn bench_decode_g726_32k_alaw_mono_1s(c: &mut Criterion) {
     g.finish();
 }
 
+/// G.723/G.721-in-WAV sub-block framing, stereo: the timed loop runs
+/// the bit-cell unpack plus two independent codec lanes over 1 s of
+/// stereo stream at 40 kbit/s (the widest sub-blocks). The delta
+/// against `decode_g726_40kbit_mono_1s` prices the container layer +
+/// second lane.
+fn bench_decode_g726_40k_wav_stereo_1s(c: &mut Criterion) {
+    let rate = g726::Rate::R40;
+    let pcm = build_pcm(2 * 8_000, 0x0726_0000 ^ 0x77);
+    let mut enc = [g726::State::new(rate), g726::State::new(rate)];
+    let bytes = g726::wav_encode_packet(&pcm, &mut enc).expect("bench setup encode");
+
+    let mut g = c.benchmark_group("decode_g726_40kbit_wav_stereo_1s");
+    g.throughput(Throughput::Bytes(bytes.len() as u64));
+    g.bench_function(
+        BenchmarkId::from_parameter("g726/40kbit/wav/stereo/8000Hz/1s"),
+        |b| {
+            b.iter(|| {
+                let src = criterion::black_box(&bytes);
+                let mut st = [g726::State::new(rate), g726::State::new(rate)];
+                let out = g726::wav_decode_packet(src, &mut st).expect("bench decode");
+                criterion::black_box(out)
+            });
+        },
+    );
+    g.finish();
+}
+
 fn bench_decode_g726_16k_mono_1s(c: &mut Criterion) {
     bench_decode_g726_1s(c, g726::Rate::R16, "16kbit");
 }
@@ -554,5 +581,6 @@ criterion_group!(
     bench_decode_g726_32k_mono_1s,
     bench_decode_g726_40k_mono_1s,
     bench_decode_g726_32k_alaw_mono_1s,
+    bench_decode_g726_40k_wav_stereo_1s,
 );
 criterion_main!(benches);

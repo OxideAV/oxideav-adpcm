@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sub-block boundaries, ragged-tail rejects, aux-stripping bounds);
   both ran bounded coverage-guided sessions (~1.4M / ~2.6M execs) with
   zero findings.
+- **WAV-framing bench scenario** — `decode_g726_40kbit_wav_stereo_1s`
+  times the bit-cell unpack plus two independent codec lanes over 1 s
+  of 40 kbit/s stereo stream; at ~343 µs vs ~179 µs for the mono raw
+  stream (reference machine) the container layer + second lane cost
+  ~1.91× mono, i.e. the per-sample state machine still dominates and
+  the sub-block layer itself is effectively free.
 
 - **`WAVE_FORMAT_G723_ADPCM` (`0x0014`) alias tag for G.726** — the older
   CCITT G.723 ADPCM (3-bit / 24 kbit/s and 5-bit / 40 kbit/s rates) that
