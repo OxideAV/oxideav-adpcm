@@ -276,7 +276,10 @@ registry matrix (byte-split invariance against the direct API,
 aux stripping at hostile split points, option validation, per-lane
 reset). `tests/g726_vbr.rs` pins mid-stream rate switching properties
 (lockstep SNR floors, SYNC tandem transparency, state carriage being
-load-bearing) under the staged demo schedule shape;
+load-bearing) under the staged demo schedule shape **and** under a
+per-sample pseudo-random rate walk — Appendix I.1's strongest form,
+switching at arbitrary non-block-aligned positions with tandem
+transparency held on both law interfaces;
 `tests/g726_vbr_conformance.rs` is the black-box gate on top: the
 staged VBR demo reference's linear leg reproduced bit-exactly
 (52 736/52 736 words, 3 295 mid-stream rate switches at the

@@ -37,7 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   upstream-docs gap, not a codec gap (the law interfaces are already
   bit-exact per the Appendix II corpus). `tests/g726_vbr.rs` header
   corrected to cite the established 16-sample period while keeping its
-  256-sample property-test blocks for SNR-floor stability.
+  256-sample property-test blocks for SNR-floor stability, and gains a
+  **per-sample pseudo-random rate walk** test — Appendix I.1's
+  strongest form, the rate free to change at every sample at arbitrary
+  non-block-aligned positions — pinning encoder/decoder lockstep and
+  word-exact SYNC tandem transparency on both law interfaces under
+  thousands of random switches.
 
 - **G.723/G.721-in-WAV sub-block bit-cell codec** — the intra-sub-block
   bit grid is now staged (`docs/audio/adpcm/g72x-wav/`, reconstructed

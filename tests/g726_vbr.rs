@@ -202,3 +202,73 @@ fn resetting_at_a_switch_diverges_from_carrying_state() {
         "carrying state ({snr_carry:.1} dB) must beat resetting ({snr_reset:.1} dB)"
     );
 }
+
+/// Appendix I.1's strongest form: the rate may change at *every*
+/// sample, at arbitrary (non-block-aligned) positions. A deterministic
+/// pseudo-random per-sample rate walk keeps encoder and decoder in
+/// lockstep (the decoder tracks the input through every one of the
+/// thousands of switches), and the §4.2.8 SYNC tandem-transparency
+/// guarantee still holds word-for-word with all stages switching on
+/// the same random walk.
+#[test]
+fn per_sample_random_rate_walk_keeps_lockstep_and_tandem_transparency() {
+    let n = 4096usize;
+    let pcm = test_signal(n);
+
+    // xorshift32 rate walk — switches on average every sample, with
+    // runs of equal rates mixed in.
+    let mut seed = 0x1234_5678u32;
+    let mut rates = Vec::with_capacity(n);
+    for _ in 0..n {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        rates.push(match seed % 4 {
+            0 => Rate::R16,
+            1 => Rate::R24,
+            2 => Rate::R32,
+            _ => Rate::R40,
+        });
+    }
+
+    // Lockstep on the linear interface.
+    let mut enc = State::new(rates[0]);
+    let mut dec = State::new(rates[0]);
+    let mut out = Vec::with_capacity(n);
+    for (i, &s) in pcm.iter().enumerate() {
+        enc.set_rate(rates[i]);
+        dec.set_rate(rates[i]);
+        out.push(dec.decode_i16(enc.encode_i16(s)));
+    }
+    // Frequent 16 kbit/s samples bound the figure; it must still track.
+    let snr = snr_db(&pcm, &out);
+    assert!(
+        snr > 4.0,
+        "per-sample switching lost lockstep ({snr:.1} dB)"
+    );
+
+    // Tandem transparency on both law interfaces under the same walk.
+    for law in [Law::ALaw, Law::ULaw] {
+        let stage = |input: &[u8]| -> Vec<u8> {
+            let mut e = State::new(rates[0]);
+            let mut d = State::new(rates[0]);
+            input
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| {
+                    e.set_rate(rates[i]);
+                    d.set_rate(rates[i]);
+                    d.decode_law(e.encode_law(w, law), law)
+                })
+                .collect()
+        };
+        let law0: Vec<u8> = pcm.iter().map(|&s| compress_i16(s, law)).collect();
+        let law1 = stage(&law0);
+        let law2 = stage(&law1);
+        let law3 = stage(&law2);
+        assert_eq!(
+            law2, law3,
+            "{law:?}: tandem transparency broke under per-sample switching"
+        );
+    }
+}
