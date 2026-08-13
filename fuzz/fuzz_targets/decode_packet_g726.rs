@@ -114,4 +114,37 @@ fuzz_target!(|data: &[u8]| {
             assert!(wav_decode_packet(&payload_only, &mut states3).is_err());
         }
     }
+
+    // --- VBR rate-walk tandem leg ---------------------------------------
+    // Appendix I.1 lets the rate change at every sample with state
+    // carried. Derive a per-sample rate walk *and* a law-word input
+    // stream from the payload, run three synchronous stages, and
+    // require the §4.2.8 SYNC guarantee word-for-word: stage 2 and
+    // stage 3 must be identical for ANY input under ANY schedule.
+    let walk_rate = |b: u8| match b >> 6 {
+        0 => Rate::R16,
+        1 => Rate::R24,
+        2 => Rate::R32,
+        _ => Rate::R40,
+    };
+    let stage = |input: &[u8]| -> Vec<u8> {
+        let mut e = State::new(walk_rate(payload[0]));
+        let mut d = State::new(walk_rate(payload[0]));
+        input
+            .iter()
+            .zip(payload)
+            .map(|(&w, &sel)| {
+                let r = walk_rate(sel);
+                e.set_rate(r);
+                d.set_rate(r);
+                d.decode_law(e.encode_law(w, law), law)
+            })
+            .collect()
+    };
+    if !payload.is_empty() {
+        let law1 = stage(payload);
+        let law2 = stage(&law1);
+        let law3 = stage(&law2);
+        assert_eq!(law2, law3, "SYNC tandem broke under a fuzz rate walk");
+    }
 });
