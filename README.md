@@ -161,10 +161,14 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   40 kbit/s) that the 1990 Recommendation consolidates alongside G.721 —
   with the rate taken from `wBitsPerSample`. Mid-stream **rate
   switching with state carriage** (`State::set_rate` — the Appendix I.1
-  DCME property; only the quantizer tables are rate-scoped) is pinned
-  under the staged demo schedule (`16-24-32-40-32-24` kbit/s cyclic at
-  a 256-sample period), including SYNC tandem transparency held across
-  the switches.
+  DCME property; only the quantizer tables are rate-scoped) is proven
+  **bit-exact against the staged VBR demo reference**: the linear leg
+  (`voicevbr.lrf`) reproduces byte-for-byte over all 52 736 samples —
+  3 295 scheduled switches through the `16-24-32-40-32-24` kbit/s
+  cycle at the demo's true 16-sample frame period (the staged note's
+  256-sample inference is corrected and pinned), A-law compand front
+  end and §4.2.8 output chain included — plus SYNC tandem transparency
+  held across switches.
 - **G.723/G.721-in-WAV sub-block framing (`framing=wav`)** — the WAV
   carriage of the same codes (tags `0x0014` / `0x0040`) groups them
   into whole-byte 8-sample-per-channel **sub-blocks** instead of the
@@ -270,8 +274,22 @@ surviving catalogue bit row re-derived independently of the packer,
 stereo lane independence, cross-packet state carriage, and the full
 registry matrix (byte-split invariance against the direct API,
 aux stripping at hostile split points, option validation, per-lane
-reset). `tests/g726_vbr.rs` pins mid-stream rate switching under the
-staged demo schedule. The structured-malformation suites add
+reset). `tests/g726_vbr.rs` pins mid-stream rate switching properties
+(lockstep SNR floors, SYNC tandem transparency, state carriage being
+load-bearing) under the staged demo schedule shape;
+`tests/g726_vbr_conformance.rs` is the black-box gate on top: the
+staged VBR demo reference's linear leg reproduced bit-exactly
+(52 736/52 736 words, 3 295 mid-stream rate switches at the
+empirically established 16-sample frame period), with negative pins
+proving the reference itself carries state across switches and that
+the staged note's 256-sample period inference does not reproduce.
+The vectors stay in the docs staging area — the test reads them via
+the `OXIDEAV_G726_VBR_DIR` environment variable and skips cleanly
+when unset. The two log-PCM legs (`voicevbr.arf`/`.urf`) are not
+reproducible from the staged `voice.src` under any byte-level input
+model and are left unpinned as a documented docs gap (the codec's law
+interfaces are already bit-exact per Appendix II).
+The structured-malformation suites add
 `framing=wav` legs — arbitrary bytes and random packet/frame chops
 (mid-prefix, mid-code, mid-frame) match whole-buffer references
 exactly and never panic — and the `decode_packet_g726` /

@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **G.726 VBR conformance — staged demo reference reproduced
+  bit-exactly** (`tests/g726_vbr_conformance.rs`). The staged VBR demo
+  reference set (`docs/audio/adpcm/g726/conformance/voice*`, schedule
+  recovered in `docs/audio/adpcm/g726/vbr-demo-rate-schedule.md`) is
+  now a black-box gate on `State::set_rate`: the linear leg
+  (`voicevbr.lrf`) reproduces byte-for-byte over all 52 736 samples —
+  A-law compand front end, §4.2.1/§4.2.8 law interface, and 3 295
+  mid-stream rate switches through the `16-24-32-40-32-24` kbit/s
+  cycle with full Table 6 state carriage. The run also settles the
+  schedule note's one flagged unknown **empirically**: the demo's
+  frame period is **16 samples, not the note's 256-sample inference**
+  (a 256-period run diverges; pinned by
+  `frame_period_is_16_samples_not_256`), and a codec pair that resets
+  at each switch falls off the reference trajectory (pinned by
+  `reference_run_carries_state_across_switches` — the reference itself
+  carries state). The vectors are non-normative demo data and stay in
+  the docs staging area: the tests read them through the
+  `OXIDEAV_G726_VBR_DIR` environment variable and skip cleanly when it
+  is unset. The two log-PCM legs (`voicevbr.arf` / `voicevbr.urf`) are
+  deliberately unpinned: exhaustive black-box search shows they are
+  not reproducible from the staged `voice.src` under any byte-level
+  input model (log-PCM passthrough matches both legs bit-exactly
+  through sample 82 — up to the file's embedded ASCII annotation —
+  then provably admits no shared continuation; every companding model
+  fails from sample 0), so their reconstruction is a documented
+  upstream-docs gap, not a codec gap (the law interfaces are already
+  bit-exact per the Appendix II corpus). `tests/g726_vbr.rs` header
+  corrected to cite the established 16-sample period while keeping its
+  256-sample property-test blocks for SNR-floor stability.
+
 - **G.723/G.721-in-WAV sub-block bit-cell codec** — the intra-sub-block
   bit grid is now staged (`docs/audio/adpcm/g72x-wav/`, reconstructed
   from the packing convention plus the surviving stereo-3-bit "Byte 3"

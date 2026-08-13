@@ -6,9 +6,13 @@
 //! sample-by-sample without resetting the predictor. The staged
 //! demo-schedule note (`docs/audio/adpcm/g726/vbr-demo-rate-schedule.md`)
 //! documents the conventional block-cyclic form of that operation: the
-//! rate list `16-24-32-40-32-24` kbit/s applied cyclically at a
-//! 256-sample period, stopping mid-cycle wherever the input ends.
-//! These tests pin the crate's behaviour under exactly that schedule.
+//! rate list `16-24-32-40-32-24` kbit/s applied cyclically, stopping
+//! mid-cycle wherever the input ends. (The demo's true switching
+//! period is 16 samples — established bit-exactly against the staged
+//! reference vectors in `tests/g726_vbr_conformance.rs`, correcting
+//! the note's 256-sample inference.) These property tests keep a
+//! 256-sample block so the per-block SNR statistics are stable; the
+//! schedule shape and state-carriage semantics are the same.
 
 use oxideav_adpcm::g726::{compress_i16, expand_i16, Law, Rate, State};
 
@@ -24,7 +28,9 @@ const SCHEDULE: [Rate; 6] = [
     Rate::R24,
 ];
 
-/// Rate-switch period in samples (the conventional demo block length).
+/// Rate-switch period used by these property tests. Longer than the
+/// demo's true 16-sample period (see `g726_vbr_conformance.rs`) so
+/// each block carries enough samples for meaningful SNR floors.
 const PERIOD: usize = 256;
 
 fn schedule_rate(sample_idx: usize) -> Rate {
