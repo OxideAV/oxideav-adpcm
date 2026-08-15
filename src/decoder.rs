@@ -651,6 +651,40 @@ pub(crate) fn parse_yamaha_chip_option(
     }
 }
 
+/// Parse the `quantizer` codec option into a
+/// [`crate::encoder::Quantizer`].
+///
+/// Accepted only for the IMA variants ([`Variant::ImaWav`] /
+/// [`Variant::ImaQt`]): `"search"` (default; the decoder-loop search)
+/// or `"reference"` (the IMA Recommended Practices Appendix D §6.1 /
+/// DVI reference ladder compressor). The option selects encoder
+/// behaviour only — the emitted stream decodes identically either way —
+/// so the decoder factory validates and ignores it, keeping an
+/// encode→decode pair built from one `CodecParameters` working. For any
+/// other variant a present option is rejected.
+pub(crate) fn parse_ima_quantizer_option(
+    variant: Variant,
+    params: &CodecParameters,
+) -> Result<crate::encoder::Quantizer> {
+    match params.options.get("quantizer") {
+        None => Ok(crate::encoder::Quantizer::Search),
+        Some(v) => {
+            if !matches!(variant, Variant::ImaWav | Variant::ImaQt) {
+                return Err(Error::unsupported(format!(
+                    "adpcm: quantizer option {v:?} is only valid for adpcm_ima_wav / adpcm_ima_qt, not {variant:?}"
+                )));
+            }
+            match v {
+                "search" => Ok(crate::encoder::Quantizer::Search),
+                "reference" => Ok(crate::encoder::Quantizer::Reference),
+                other => Err(Error::unsupported(format!(
+                    "adpcm_ima: quantizer option {other:?} not supported (search or reference)"
+                ))),
+            }
+        }
+    }
+}
+
 /// Parse the `nibble_order` codec option into a [`dialogic::NibbleOrder`].
 ///
 /// Accepted only for [`Variant::Dialogic`] (OKI / Dialogic VOX): `"hi"`
@@ -949,6 +983,12 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // multiplier table differs, so a long stream diverges when decoded
     // against the wrong constants. Other variants reject the option.
     let yamaha_chip = parse_yamaha_chip_option(variant, params)?;
+    // `quantizer` codec option — encoder-side nibble-selection strategy
+    // for the IMA variants. The stream decodes identically either way,
+    // so the decoder validates the option (foreign variants reject it,
+    // bad values error) and otherwise ignores it — an encode→decode
+    // pair built from one `CodecParameters` keeps working.
+    let _ = parse_ima_quantizer_option(variant, params)?;
     // `nibble_order` codec option — OKI / Dialogic chips read the two
     // nibbles in a byte in opposite orders: `hi` (default; Dialogic VOX /
     // MSM6295, high nibble = first sample) or `lo` (MSM6258, low nibble =

@@ -60,6 +60,7 @@ use std::collections::VecDeque;
 
 use crate::dialogic;
 use crate::g726;
+use crate::ima_wav;
 use crate::tables::{
     IMA3_INDEX_ADJUST, IMA_INDEX_ADJUST, IMA_STEP_SIZE, MS_ADAPTATION, MS_ADAPT_COEFF1,
     MS_ADAPT_COEFF2,
@@ -74,6 +75,33 @@ use oxideav_core::{
 /// variants. A common WAV-container choice at 22050 Hz mono that gives
 /// the nibble search a reasonable amortisation horizon.
 pub const DEFAULT_BLOCK_SIZE: usize = 256;
+
+/// Nibble-selection strategy for the IMA encoders (IMA-WAV 4-bit and
+/// 3-bit, IMA-QT), chosen by the `quantizer` codec option.
+///
+/// - [`Quantizer::Search`] (default) — the decoder-loop search: every
+///   candidate code is simulated through the decoder recurrence and the
+///   one minimising absolute reconstruction error wins. Best quality;
+///   the emitted bytes depend on this crate's search heuristics
+///   (including the per-block step-index seed).
+/// - [`Quantizer::Reference`] — the published **reference ladder
+///   compressor**: the compression procedure of the IMA "Recommended
+///   Practices" Rev 3.00 Appendix D §6.1 / the *DVI ADPCM Wave Type*
+///   specification ([`crate::ima_wav::ima_quantize_nibble`] /
+///   [`crate::ima_wav::ima_quantize_code3`]). Deterministic interchange
+///   behaviour: the step index is cleared once before the first block
+///   and carried across block boundaries (each block header records the
+///   index the previous block ended on), exactly as the listing
+///   prescribes — so the byte stream matches what any other
+///   spec-conforming reference compressor emits for the same input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Quantizer {
+    /// Decoder-loop search (best quality, crate-specific stream).
+    #[default]
+    Search,
+    /// The Appendix D §6.1 / DVI reference ladder (interchange-exact).
+    Reference,
+}
 
 // ---------------------------------------------------------------------------
 // MS-ADPCM encoder
@@ -637,6 +665,102 @@ pub fn ima_encode_block(samples: &[i16], channels: usize, block_size: usize) -> 
     Ok(out)
 }
 
+/// Encode one IMA-ADPCM-WAV block with the **reference ladder
+/// compressor** (IMA Recommended Practices Rev 3.00 Appendix D §6.1 /
+/// the *DVI ADPCM Wave Type* 4-bit encoding procedure).
+///
+/// Geometry and layout are identical to [`ima_encode_block`]. The
+/// differences are the published encoding procedure itself:
+///
+/// - `states` carries one [`ima_wav::ImaCodecState`] per channel
+///   **across blocks**. Per the specification the step index is cleared
+///   only before the first block (`ImaCodecState::default()`), and each
+///   block header records the index the previous block ended on. The
+///   caller keeps the slice alive between calls; `states.len()` must
+///   equal `channels`.
+/// - Each channel's header predictor is the channel's first input
+///   sample verbatim (`Samp0` in the listing) — no heuristic step-index
+///   seeding, no error-minimising search — and the remaining samples
+///   are quantized by the §6.1 ladder
+///   ([`ima_wav::ima_quantize_nibble`]).
+///
+/// On return `states` holds each channel's end-of-block state, ready
+/// for the next block. Out-of-range `step_index` values in `states` are
+/// clamped to `0..=88` on entry (the range the header byte can carry).
+pub fn ima_encode_block_reference(
+    samples: &[i16],
+    channels: usize,
+    block_size: usize,
+    states: &mut [ima_wav::ImaCodecState],
+) -> Result<Vec<u8>> {
+    if channels == 0 || channels > 8 {
+        return Err(Error::unsupported(format!(
+            "adpcm_ima_wav encoder: channel count {channels} not supported (1..=8)"
+        )));
+    }
+    if states.len() != channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav encoder: {} states for {channels} channels",
+            states.len()
+        )));
+    }
+    let header_len = 4 * channels;
+    if block_size < header_len {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav encoder: block size {block_size} < header {header_len}"
+        )));
+    }
+    let body_len = block_size - header_len;
+    let group_bytes = 4 * channels;
+    if body_len % group_bytes != 0 {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav encoder: body length {body_len} not multiple of {group_bytes} ({channels}ch × 4B)"
+        )));
+    }
+    let groups = body_len / group_bytes;
+    let samples_per_channel = 1 + groups * 8;
+    if samples.len() != samples_per_channel * channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav encoder: got {} samples, expected {} ({} per channel × {channels})",
+            samples.len(),
+            samples_per_channel * channels,
+            samples_per_channel
+        )));
+    }
+
+    let mut out = Vec::with_capacity(block_size);
+    // Header — per channel: Samp0 verbatim + the carried step index.
+    for (ch, st) in states.iter_mut().enumerate() {
+        let samp0 = samples[ch];
+        st.predictor = samp0 as i32;
+        st.step_index = st.step_index.clamp(0, 88);
+        out.extend_from_slice(&samp0.to_le_bytes());
+        out.push(st.step_index as u8);
+        out.push(0);
+    }
+
+    // Body: identical framing to the search encoder; the ladder picks
+    // each nibble.
+    let mut body = vec![0u8; body_len];
+    for g in 0..groups {
+        let group_start = g * group_bytes;
+        for (ch, st) in states.iter_mut().enumerate() {
+            for i in 0..4 {
+                let sample_lo_idx = 1 + g * 8 + i * 2;
+                let t_lo = samples[sample_lo_idx * channels + ch];
+                let n_lo =
+                    ima_wav::ima_quantize_nibble(&mut st.predictor, &mut st.step_index, t_lo);
+                let t_hi = samples[(sample_lo_idx + 1) * channels + ch];
+                let n_hi =
+                    ima_wav::ima_quantize_nibble(&mut st.predictor, &mut st.step_index, t_hi);
+                body[group_start + 4 * ch + i] = (n_hi << 4) | n_lo;
+            }
+        }
+    }
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
 // ----- 3-bit IMA-ADPCM-WAV (`wBitsPerSample = 3`) -----
 
 /// Run the 3-bit IMA decoder recurrence for one code without mutating
@@ -798,6 +922,86 @@ pub fn ima_encode_block_3bit(
     Ok(out)
 }
 
+/// Encode one **3-bit** IMA-ADPCM-WAV block with the reference ladder
+/// compressor (the *DVI ADPCM Wave Type* 3-bit encoding procedure).
+///
+/// Geometry and layout are identical to [`ima_encode_block_3bit`];
+/// state semantics (per-channel carry across blocks, `Samp0` header
+/// seed, no search) match [`ima_encode_block_reference`], with the
+/// 3-bit ladder [`ima_wav::ima_quantize_code3`] picking each code.
+pub fn ima_encode_block_3bit_reference(
+    samples: &[i16],
+    channels: usize,
+    block_size: usize,
+    states: &mut [ima_wav::ImaCodecState],
+) -> Result<Vec<u8>> {
+    use crate::ima_wav::{GROUP_BYTES_3BIT, GROUP_SAMPLES_3BIT};
+    if channels == 0 || channels > 8 {
+        return Err(Error::unsupported(format!(
+            "adpcm_ima_wav(3-bit) encoder: channel count {channels} not supported (1..=8)"
+        )));
+    }
+    if states.len() != channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav(3-bit) encoder: {} states for {channels} channels",
+            states.len()
+        )));
+    }
+    let header_len = 4 * channels;
+    if block_size < header_len {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav(3-bit) encoder: block size {block_size} < header {header_len}"
+        )));
+    }
+    let body_len = block_size - header_len;
+    let group_bytes = GROUP_BYTES_3BIT * channels;
+    if body_len % group_bytes != 0 {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav(3-bit) encoder: body length {body_len} not multiple of {group_bytes} ({channels}ch × 12B)"
+        )));
+    }
+    let groups = body_len / group_bytes;
+    let samples_per_channel = 1 + groups * GROUP_SAMPLES_3BIT;
+    if samples.len() != samples_per_channel * channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_wav(3-bit) encoder: got {} samples, expected {} ({} per channel × {channels})",
+            samples.len(),
+            samples_per_channel * channels,
+            samples_per_channel
+        )));
+    }
+
+    let mut out = Vec::with_capacity(block_size);
+    for (ch, st) in states.iter_mut().enumerate() {
+        let samp0 = samples[ch];
+        st.predictor = samp0 as i32;
+        st.step_index = st.step_index.clamp(0, 88);
+        out.extend_from_slice(&samp0.to_le_bytes());
+        out.push(st.step_index as u8);
+        out.push(0);
+    }
+
+    let mut body = vec![0u8; body_len];
+    for g in 0..groups {
+        let group_start = g * group_bytes;
+        for (ch, st) in states.iter_mut().enumerate() {
+            let mut bits: u128 = 0;
+            for k in 0..GROUP_SAMPLES_3BIT {
+                let sample_idx = 1 + g * GROUP_SAMPLES_3BIT + k;
+                let target = samples[sample_idx * channels + ch];
+                let code =
+                    ima_wav::ima_quantize_code3(&mut st.predictor, &mut st.step_index, target);
+                bits |= (code as u128) << (3 * k);
+            }
+            for i in 0..GROUP_BYTES_3BIT {
+                body[group_start + GROUP_BYTES_3BIT * ch + i] = ((bits >> (8 * i)) & 0xFF) as u8;
+            }
+        }
+    }
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
 /// Compute a near-256-byte default block size that satisfies the 4-bit
 /// framing constraint (header + a whole number of 4-byte groups per
 /// channel). At least one group is always included.
@@ -831,6 +1035,11 @@ pub struct ImaWavEncoder {
     channels: usize,
     block_size: usize,
     bits_per_sample: u8,
+    quantizer: Quantizer,
+    /// Per-channel codec state for [`Quantizer::Reference`] — carried
+    /// across blocks per the specification (index cleared once, before
+    /// the first block). Unused under [`Quantizer::Search`].
+    ref_states: Vec<ima_wav::ImaCodecState>,
     pcm: Vec<i16>,
     pending: VecDeque<Packet>,
     samples_emitted: i64,
@@ -840,6 +1049,13 @@ pub struct ImaWavEncoder {
 impl ImaWavEncoder {
     pub fn set_block_size(&mut self, block_size: usize) {
         self.block_size = block_size;
+    }
+    /// Select the nibble-selection strategy (see [`Quantizer`]). Call
+    /// *before* the first `send_frame`; the reference compressor's
+    /// carried step index starts at 0 as the specification prescribes.
+    pub fn set_quantizer(&mut self, quantizer: Quantizer) {
+        self.quantizer = quantizer;
+        self.ref_states = vec![ima_wav::ImaCodecState::default(); self.channels];
     }
     /// Select 3-bit or 4-bit coding (`WAVEFORMATEX::wBitsPerSample` —
     /// the only two widths tag `0x0011` defines). Call *before*
@@ -878,11 +1094,24 @@ impl ImaWavEncoder {
         }
         1 + (body_len / group_bytes) * group_samples
     }
-    fn encode_one_block(&self, samples: &[i16]) -> Result<Vec<u8>> {
-        if self.bits_per_sample == 3 {
-            ima_encode_block_3bit(samples, self.channels, self.block_size)
-        } else {
-            ima_encode_block(samples, self.channels, self.block_size)
+    fn encode_one_block(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
+        match (self.quantizer, self.bits_per_sample) {
+            (Quantizer::Search, 3) => {
+                ima_encode_block_3bit(samples, self.channels, self.block_size)
+            }
+            (Quantizer::Search, _) => ima_encode_block(samples, self.channels, self.block_size),
+            (Quantizer::Reference, 3) => ima_encode_block_3bit_reference(
+                samples,
+                self.channels,
+                self.block_size,
+                &mut self.ref_states,
+            ),
+            (Quantizer::Reference, _) => ima_encode_block_reference(
+                samples,
+                self.channels,
+                self.block_size,
+                &mut self.ref_states,
+            ),
         }
     }
     fn drain_blocks(&mut self, allow_partial_final: bool) -> Result<()> {
@@ -1072,6 +1301,67 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
     Ok(out)
 }
 
+/// Encode one QuickTime IMA ADPCM block per channel with the reference
+/// ladder compressor (IMA Recommended Practices Rev 3.00 Appendix D
+/// §6.1 — the quantization procedure; the 34-byte block layout is the
+/// QT framing this crate already implements).
+///
+/// Geometry and layout are identical to [`ima_qt_encode_block`]. As in
+/// [`ima_encode_block_reference`], `states` carries one
+/// [`ima_wav::ImaCodecState`] per channel across blocks: the step index
+/// starts at 0 before the first block and each block preamble records
+/// the carried index. The predictor seed is the channel's first sample
+/// quantised to the top 9 bits — the only seed the QT preamble can
+/// carry — and all 64 samples are quantized by the §6.1 ladder with no
+/// heuristic seeding, so the byte stream is fully determined by the
+/// input.
+pub fn ima_qt_encode_block_reference(
+    samples: &[i16],
+    channels: usize,
+    states: &mut [ima_wav::ImaCodecState],
+) -> Result<Vec<u8>> {
+    if channels == 0 || channels > crate::ima_qt::QT_MAX_CHANNELS {
+        return Err(Error::unsupported(format!(
+            "adpcm_ima_qt encoder: channel count {channels} not supported (1..={})",
+            crate::ima_qt::QT_MAX_CHANNELS
+        )));
+    }
+    if states.len() != channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_qt encoder: {} states for {channels} channels",
+            states.len()
+        )));
+    }
+    let expected = QT_SAMPLES_PER_BLOCK * channels;
+    if samples.len() != expected {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_qt encoder: got {} samples, expected {expected} ({QT_SAMPLES_PER_BLOCK} per channel × {channels})",
+            samples.len()
+        )));
+    }
+
+    let mut out = vec![0u8; QT_BLOCK_BYTES_PER_CHANNEL * channels];
+    for (ch, st) in states.iter_mut().enumerate() {
+        let block_off = ch * QT_BLOCK_BYTES_PER_CHANNEL;
+        let predictor_seed = (samples[ch] as i32) & !0x7F;
+        st.predictor = predictor_seed;
+        st.step_index = st.step_index.clamp(0, 88);
+
+        let preamble: u16 = (predictor_seed as u16 & 0xFF80) | (st.step_index as u16 & 0x7F);
+        out[block_off] = (preamble >> 8) as u8;
+        out[block_off + 1] = (preamble & 0xFF) as u8;
+
+        for i in 0..32 {
+            let t_lo = samples[(i * 2) * channels + ch];
+            let n_lo = ima_wav::ima_quantize_nibble(&mut st.predictor, &mut st.step_index, t_lo);
+            let t_hi = samples[(i * 2 + 1) * channels + ch];
+            let n_hi = ima_wav::ima_quantize_nibble(&mut st.predictor, &mut st.step_index, t_hi);
+            out[block_off + 2 + i] = (n_hi << 4) | n_lo;
+        }
+    }
+    Ok(out)
+}
+
 /// IMA-ADPCM-QT encoder (Apple `ima4`).
 ///
 /// QT blocks are fixed-size — there is no `set_block_size` method because
@@ -1079,6 +1369,10 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
 pub struct ImaQtEncoder {
     output_params: CodecParameters,
     channels: usize,
+    quantizer: Quantizer,
+    /// Per-channel codec state for [`Quantizer::Reference`] — the step
+    /// index carries across blocks; unused under [`Quantizer::Search`].
+    ref_states: Vec<ima_wav::ImaCodecState>,
     pcm: Vec<i16>,
     pending: VecDeque<Packet>,
     samples_emitted: i64,
@@ -1086,13 +1380,27 @@ pub struct ImaQtEncoder {
 }
 
 impl ImaQtEncoder {
+    /// Select the nibble-selection strategy (see [`Quantizer`]). Call
+    /// *before* the first `send_frame`.
+    pub fn set_quantizer(&mut self, quantizer: Quantizer) {
+        self.quantizer = quantizer;
+        self.ref_states = vec![ima_wav::ImaCodecState::default(); self.channels];
+    }
+    fn encode_one_block(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
+        match self.quantizer {
+            Quantizer::Search => ima_qt_encode_block(samples, self.channels),
+            Quantizer::Reference => {
+                ima_qt_encode_block_reference(samples, self.channels, &mut self.ref_states)
+            }
+        }
+    }
     fn drain_blocks(&mut self, allow_partial_final: bool) -> Result<()> {
         let n_per_block = QT_SAMPLES_PER_BLOCK;
         let per_block_samples_interleaved = n_per_block * self.channels;
         let tb = TimeBase::new(1, self.output_params.sample_rate.unwrap_or(1) as i64);
         while self.pcm.len() >= per_block_samples_interleaved {
             let take: Vec<i16> = self.pcm.drain(..per_block_samples_interleaved).collect();
-            let bytes = ima_qt_encode_block(&take, self.channels)?;
+            let bytes = self.encode_one_block(&take)?;
             let pts = self.samples_emitted;
             self.samples_emitted += n_per_block as i64;
             self.pending
@@ -1114,7 +1422,7 @@ impl ImaQtEncoder {
             }
             debug_assert_eq!(self.pcm.len(), per_block_samples_interleaved);
             let take: Vec<i16> = self.pcm.drain(..).collect();
-            let bytes = ima_qt_encode_block(&take, self.channels)?;
+            let bytes = self.encode_one_block(&take)?;
             let pts = self.samples_emitted;
             self.samples_emitted += n_per_block as i64;
             self.pending
@@ -1558,11 +1866,17 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                     "adpcm_ima_wav encoder: channels {channels} > 8 not supported"
                 )));
             }
+            // `quantizer` codec option: "search" (default; decoder-loop
+            // search) or "reference" (the Appendix D §6.1 / DVI ladder).
+            let quantizer =
+                crate::decoder::parse_ima_quantizer_option(crate::Variant::ImaWav, params)?;
             let mut enc = ImaWavEncoder {
                 output_params: params.clone(),
                 channels: channels as usize,
                 block_size: default_block_size_4bit(channels as usize),
                 bits_per_sample: 4,
+                quantizer,
+                ref_states: vec![ima_wav::ImaCodecState::default(); channels as usize],
                 pcm: Vec::new(),
                 pending: VecDeque::new(),
                 samples_emitted: 0,
@@ -1587,9 +1901,15 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                     crate::ima_qt::QT_MAX_CHANNELS
                 )));
             }
+            // `quantizer` codec option — same semantics as the IMA-WAV
+            // encoder (the QT framing wraps the same §6.1 quantizer).
+            let quantizer =
+                crate::decoder::parse_ima_quantizer_option(crate::Variant::ImaQt, params)?;
             Ok(Box::new(ImaQtEncoder {
                 output_params: params.clone(),
                 channels: channels as usize,
+                quantizer,
+                ref_states: vec![ima_wav::ImaCodecState::default(); channels as usize],
                 pcm: Vec::new(),
                 pending: VecDeque::new(),
                 samples_emitted: 0,
@@ -2313,6 +2633,352 @@ mod tests {
         assert_eq!(p0.data.len(), QT_BLOCK_BYTES_PER_CHANNEL);
         assert_eq!(p1.data.len(), QT_BLOCK_BYTES_PER_CHANNEL);
         assert!(matches!(enc.receive_packet(), Err(Error::NeedMore)));
+    }
+
+    // ---------------- Reference-quantizer encoder tests ----------------
+
+    #[test]
+    fn ima_reference_block_round_trips_and_carries_index() {
+        // Three consecutive mono blocks of a hot signal: every block
+        // decodes through the shipped decoder, the reconstruction error
+        // is bounded, and block N+1's header records the step index
+        // block N ended on (the specification's cross-block carry).
+        let samples_per_block = 1 + 63 * 8; // 256-byte mono block
+        let pcm = sine_pcm(samples_per_block * 3, 440.0, 22050.0, 16000.0);
+        let mut states = vec![ima_wav::ImaCodecState::default(); 1];
+        let mut decoded = Vec::new();
+        let mut prev_end_index: Option<i32> = None;
+        for chunk in pcm.chunks(samples_per_block) {
+            let blk = ima_encode_block_reference(chunk, 1, 256, &mut states).unwrap();
+            assert_eq!(blk.len(), 256);
+            // Header: [samp0_lo, samp0_hi, step_index, 0].
+            assert_eq!(
+                i16::from_le_bytes([blk[0], blk[1]]),
+                chunk[0],
+                "header predictor must be Samp0 verbatim"
+            );
+            if let Some(idx) = prev_end_index {
+                assert_eq!(
+                    blk[2] as i32, idx,
+                    "block header must carry the previous block's end index"
+                );
+            } else {
+                assert_eq!(blk[2], 0, "first block starts at index 0");
+            }
+            prev_end_index = Some(states[0].step_index);
+            let d = ima_wav::decode_block(&blk, 1).unwrap();
+            decoded.extend_from_slice(&d);
+        }
+        // On a hot 16k-amplitude sine the index must actually have moved.
+        assert_ne!(prev_end_index, Some(0));
+        let rms = rms_error(&decoded, &pcm);
+        assert!(rms < 1500.0, "reference IMA-WAV round-trip RMS {rms}");
+    }
+
+    #[test]
+    fn ima_reference_3bit_block_round_trips_and_carries_index() {
+        use crate::ima_wav::GROUP_SAMPLES_3BIT;
+        let block_size = default_block_size_3bit(1); // mono
+        let groups = (block_size - 4) / 12;
+        let samples_per_block = 1 + groups * GROUP_SAMPLES_3BIT;
+        let pcm = sine_pcm(samples_per_block * 3, 440.0, 22050.0, 12000.0);
+        let mut states = vec![ima_wav::ImaCodecState::default(); 1];
+        let mut decoded = Vec::new();
+        let mut prev_end_index: Option<i32> = None;
+        for chunk in pcm.chunks(samples_per_block) {
+            let blk = ima_encode_block_3bit_reference(chunk, 1, block_size, &mut states).unwrap();
+            assert_eq!(blk.len(), block_size);
+            if let Some(idx) = prev_end_index {
+                assert_eq!(blk[2] as i32, idx);
+            } else {
+                assert_eq!(blk[2], 0);
+            }
+            prev_end_index = Some(states[0].step_index);
+            let d = ima_wav::decode_block_3bit(&blk, 1).unwrap();
+            decoded.extend_from_slice(&d);
+        }
+        assert_ne!(prev_end_index, Some(0));
+        let rms = rms_error(&decoded, &pcm);
+        // 3-bit coding is coarser than 4-bit; bound accordingly.
+        assert!(rms < 3000.0, "reference 3-bit round-trip RMS {rms}");
+    }
+
+    #[test]
+    fn ima_qt_reference_block_round_trips_and_carries_index() {
+        let n_blocks = 6;
+        let pcm = sine_pcm(QT_SAMPLES_PER_BLOCK * n_blocks, 440.0, 22050.0, 16000.0);
+        let mut states = vec![ima_wav::ImaCodecState::default(); 1];
+        let mut decoded = Vec::new();
+        let mut prev_end_index: Option<i32> = None;
+        for chunk in pcm.chunks(QT_SAMPLES_PER_BLOCK) {
+            let blk = ima_qt_encode_block_reference(chunk, 1, &mut states).unwrap();
+            assert_eq!(blk.len(), QT_BLOCK_BYTES_PER_CHANNEL);
+            let preamble = u16::from_be_bytes([blk[0], blk[1]]);
+            let hdr_index = (preamble & 0x7F) as i32;
+            if let Some(idx) = prev_end_index {
+                assert_eq!(hdr_index, idx, "QT preamble must carry the running index");
+            } else {
+                assert_eq!(hdr_index, 0);
+            }
+            prev_end_index = Some(states[0].step_index);
+            let d = crate::ima_qt::decode_block(&blk, 1).unwrap();
+            decoded.extend_from_slice(&d);
+        }
+        assert_ne!(prev_end_index, Some(0));
+        let rms = rms_error(&decoded, &pcm);
+        assert!(rms < 1500.0, "reference IMA-QT round-trip RMS {rms}");
+    }
+
+    #[test]
+    fn ima_reference_stereo_lanes_are_independent() {
+        // Distinct tones per lane; per-lane RMS bounded and the two
+        // header indices track their own lanes.
+        let samples_per_block = 1 + 31 * 8; // 256-byte stereo block
+        let n = samples_per_block * 2;
+        let l = sine_pcm(n, 440.0, 22050.0, 12000.0);
+        let r = sine_pcm(n, 660.0, 22050.0, 3000.0);
+        let mut pcm = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            pcm.push(l[i]);
+            pcm.push(r[i]);
+        }
+        let mut states = vec![ima_wav::ImaCodecState::default(); 2];
+        let mut decoded_l = Vec::new();
+        let mut decoded_r = Vec::new();
+        for chunk in pcm.chunks(samples_per_block * 2) {
+            let blk = ima_encode_block_reference(chunk, 2, 256, &mut states).unwrap();
+            let d = ima_wav::decode_block(&blk, 2).unwrap();
+            for i in 0..samples_per_block {
+                decoded_l.push(d[i * 2]);
+                decoded_r.push(d[i * 2 + 1]);
+            }
+        }
+        assert_ne!(
+            states[0].step_index, states[1].step_index,
+            "lanes with very different amplitudes should end on different indices"
+        );
+        let rms_l = rms_error(&decoded_l, &l);
+        let rms_r = rms_error(&decoded_r, &r);
+        assert!(rms_l < 1500.0, "reference stereo L RMS {rms_l}");
+        assert!(rms_r < 1500.0, "reference stereo R RMS {rms_r}");
+    }
+
+    #[test]
+    fn ima_reference_block_rejects_state_len_mismatch() {
+        let pcm = vec![0i16; 505];
+        let mut states = vec![ima_wav::ImaCodecState::default(); 2];
+        assert!(ima_encode_block_reference(&pcm, 1, 256, &mut states).is_err());
+        let mut none: Vec<ima_wav::ImaCodecState> = Vec::new();
+        assert!(ima_encode_block_reference(&pcm, 1, 256, &mut none).is_err());
+        let pcm3 = vec![0i16; 1 + 20 * 32];
+        assert!(ima_encode_block_3bit_reference(&pcm3, 1, 4 + 20 * 12, &mut none).is_err());
+        let qt = vec![0i16; QT_SAMPLES_PER_BLOCK];
+        assert!(ima_qt_encode_block_reference(&qt, 1, &mut none).is_err());
+    }
+
+    #[test]
+    fn ima_reference_block_clamps_hostile_state_index() {
+        // An out-of-range carried index is clamped to 0..=88 so the
+        // emitted header always parses back through the decoder.
+        let pcm = vec![100i16; 505];
+        let mut states = vec![
+            ima_wav::ImaCodecState {
+                predictor: 0,
+                step_index: 5_000,
+            };
+            1
+        ];
+        let blk = ima_encode_block_reference(&pcm, 1, 256, &mut states).unwrap();
+        assert_eq!(blk[2], 88);
+        assert!(ima_wav::decode_block(&blk, 1).is_ok());
+        let mut states = vec![
+            ima_wav::ImaCodecState {
+                predictor: 0,
+                step_index: -7,
+            };
+            1
+        ];
+        let blk = ima_encode_block_reference(&pcm, 1, 256, &mut states).unwrap();
+        assert_eq!(blk[2], 0);
+        assert!(ima_wav::decode_block(&blk, 1).is_ok());
+    }
+
+    #[test]
+    fn registry_reference_quantizer_matches_direct_block_api() {
+        // The `quantizer=reference` registry encoder must emit exactly
+        // the bytes the direct block API produces for the same PCM,
+        // including the cross-block index carry — regardless of how the
+        // PCM is chopped into frames.
+        let samples_per_block = 1 + 63 * 8;
+        let total = samples_per_block * 3;
+        let pcm = sine_pcm(total, 330.0, 22050.0, 14000.0);
+
+        // Direct API, blocks in sequence with one carried state.
+        let mut states = vec![ima_wav::ImaCodecState::default(); 1];
+        let mut direct = Vec::new();
+        for chunk in pcm.chunks(samples_per_block) {
+            direct.extend_from_slice(
+                &ima_encode_block_reference(chunk, 1, 256, &mut states).unwrap(),
+            );
+        }
+
+        // Registry encoder fed in ragged chops.
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_IMA_WAV));
+        p.sample_rate = Some(22050);
+        p.channels = Some(1);
+        p.options.insert("quantizer", "reference");
+        let mut enc = make_encoder(&p).unwrap();
+        let chops = [37usize, 501, 129, 700, 11, 143];
+        let mut off = 0usize;
+        let mut ci = 0usize;
+        while off < total {
+            let take = chops[ci % chops.len()].min(total - off);
+            ci += 1;
+            let bytes: Vec<u8> = pcm[off..off + take]
+                .iter()
+                .flat_map(|s| s.to_le_bytes())
+                .collect();
+            enc.send_frame(&Frame::Audio(AudioFrame {
+                samples: take as u32,
+                pts: Some(off as i64),
+                data: vec![bytes],
+            }))
+            .unwrap();
+            off += take;
+        }
+        enc.flush().unwrap();
+        let mut registry = Vec::new();
+        while let Ok(pkt) = enc.receive_packet() {
+            registry.extend_from_slice(&pkt.data);
+        }
+        assert_eq!(
+            registry, direct,
+            "registry reference stream != direct block API stream"
+        );
+    }
+
+    #[test]
+    fn registry_reference_quantizer_qt_matches_direct_block_api() {
+        let total = QT_SAMPLES_PER_BLOCK * 4;
+        let pcm = sine_pcm(total, 550.0, 22050.0, 9000.0);
+        let mut states = vec![ima_wav::ImaCodecState::default(); 1];
+        let mut direct = Vec::new();
+        for chunk in pcm.chunks(QT_SAMPLES_PER_BLOCK) {
+            direct
+                .extend_from_slice(&ima_qt_encode_block_reference(chunk, 1, &mut states).unwrap());
+        }
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_IMA_QT));
+        p.sample_rate = Some(22050);
+        p.channels = Some(1);
+        p.options.insert("quantizer", "reference");
+        let mut enc = make_encoder(&p).unwrap();
+        let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        enc.send_frame(&Frame::Audio(AudioFrame {
+            samples: total as u32,
+            pts: Some(0),
+            data: vec![bytes],
+        }))
+        .unwrap();
+        enc.flush().unwrap();
+        let mut registry = Vec::new();
+        while let Ok(pkt) = enc.receive_packet() {
+            registry.extend_from_slice(&pkt.data);
+        }
+        assert_eq!(registry, direct);
+    }
+
+    #[test]
+    fn quantizer_option_validation() {
+        // Bad value errors on the IMA encoder factory.
+        let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_IMA_WAV));
+        p.sample_rate = Some(22050);
+        p.channels = Some(1);
+        p.options.insert("quantizer", "fastest");
+        assert!(make_encoder(&p).is_err());
+        // Explicit "search" is accepted and matches the default stream.
+        let samples_per_block = 1 + 63 * 8;
+        let pcm = sine_pcm(samples_per_block, 440.0, 22050.0, 8000.0);
+        let bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let run = |opt: Option<&str>| -> Vec<u8> {
+            let mut p = CodecParameters::audio(CodecId::new(crate::CODEC_ID_IMA_WAV));
+            p.sample_rate = Some(22050);
+            p.channels = Some(1);
+            if let Some(v) = opt {
+                p.options.insert("quantizer", v);
+            }
+            let mut enc = make_encoder(&p).unwrap();
+            enc.send_frame(&Frame::Audio(AudioFrame {
+                samples: samples_per_block as u32,
+                pts: Some(0),
+                data: vec![bytes.clone()],
+            }))
+            .unwrap();
+            enc.flush().unwrap();
+            let mut out = Vec::new();
+            while let Ok(pkt) = enc.receive_packet() {
+                out.extend_from_slice(&pkt.data);
+            }
+            out
+        };
+        assert_eq!(run(Some("search")), run(None));
+        // The reference stream is a different byte stream (same decode
+        // contract, different quantization decisions).
+        assert_ne!(run(Some("reference")), run(None));
+    }
+
+    #[test]
+    fn quantizer_option_rejected_on_foreign_variants() {
+        use crate::decoder::make_decoder;
+        for id in [
+            crate::CODEC_ID_MS,
+            crate::CODEC_ID_YAMAHA,
+            crate::CODEC_ID_YAMAHA_A,
+            crate::CODEC_ID_DIALOGIC,
+            crate::CODEC_ID_G726,
+        ] {
+            let mut p = CodecParameters::audio(CodecId::new(id));
+            p.sample_rate = Some(8000);
+            p.channels = Some(1);
+            p.options.insert("quantizer", "reference");
+            assert!(
+                make_decoder(&p).is_err(),
+                "{id}: decoder accepted a foreign quantizer option"
+            );
+        }
+        // The IMA decoders validate-and-ignore it (encode→decode pairs
+        // share one CodecParameters).
+        for id in [crate::CODEC_ID_IMA_WAV, crate::CODEC_ID_IMA_QT] {
+            let mut p = CodecParameters::audio(CodecId::new(id));
+            p.sample_rate = Some(22050);
+            p.channels = Some(1);
+            p.options.insert("quantizer", "reference");
+            assert!(make_decoder(&p).is_ok(), "{id}: decoder rejected quantizer");
+            p.options.insert("quantizer", "bogus");
+            assert!(
+                make_decoder(&p).is_err(),
+                "{id}: decoder accepted bogus value"
+            );
+        }
+    }
+
+    #[test]
+    fn reference_encoders_are_deterministic_across_instances() {
+        // No hidden state: two independent runs over the same PCM emit
+        // identical bytes (this is the interchange property the search
+        // encoder deliberately does not promise across crate versions).
+        let samples_per_block = 1 + 63 * 8;
+        let pcm = sine_pcm(samples_per_block * 2, 777.0, 22050.0, 11000.0);
+        let encode = || {
+            let mut states = vec![ima_wav::ImaCodecState::default(); 1];
+            let mut out = Vec::new();
+            for chunk in pcm.chunks(samples_per_block) {
+                out.extend_from_slice(
+                    &ima_encode_block_reference(chunk, 1, 256, &mut states).unwrap(),
+                );
+            }
+            out
+        };
+        assert_eq!(encode(), encode());
     }
 
     #[test]
