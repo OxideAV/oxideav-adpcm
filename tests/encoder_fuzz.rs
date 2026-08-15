@@ -45,6 +45,137 @@ impl Lcg {
     }
 }
 
+// ---------- IMA reference-quantizer encoders ----------
+
+#[test]
+fn ima_reference_encoders_survive_random_pcm_and_hostile_state() {
+    // Random PCM + arbitrary carried codec state (predictor anywhere in
+    // i32, step index far out of range) through all three reference
+    // block encoders: every Ok output must parse back through the
+    // matching block decoder to the exact sample count; Err is fine;
+    // panics are not.
+    use oxideav_adpcm::ima_wav::{self, ImaCodecState};
+    let mut rng = Lcg::new(0x00AD_5EF5u64);
+    for round in 0..200 {
+        let chs = 1 + (rng.next_u64() as usize % 8);
+        let groups = rng.next_u64() as usize % 20;
+        let hostile = ImaCodecState {
+            predictor: rng.next_u64() as i32,
+            step_index: rng.next_u64() as i16 as i32,
+        };
+
+        // 4-bit.
+        let block_size = 4 * chs + groups * 4 * chs;
+        let total = (1 + groups * 8) * chs;
+        let pcm = rng.pcm(total);
+        let mut states = vec![hostile; chs];
+        let blk = encoder::ima_encode_block_reference(&pcm, chs, block_size, &mut states)
+            .unwrap_or_else(|e| {
+                panic!("round {round}: 4-bit reference rejected valid shape: {e:?}")
+            });
+        let decoded = ima_wav::decode_block(&blk, chs).expect("4-bit reference decode");
+        assert_eq!(decoded.len(), total);
+        for st in &states {
+            assert!(
+                (0..=88).contains(&st.step_index),
+                "state index escaped clamp"
+            );
+        }
+
+        // 3-bit.
+        let block_size3 = 4 * chs + groups * 12 * chs;
+        let total3 = (1 + groups * 32) * chs;
+        let pcm3 = rng.pcm(total3);
+        let mut states3 = vec![hostile; chs];
+        let blk3 = encoder::ima_encode_block_3bit_reference(&pcm3, chs, block_size3, &mut states3)
+            .unwrap_or_else(|e| {
+                panic!("round {round}: 3-bit reference rejected valid shape: {e:?}")
+            });
+        let decoded3 = ima_wav::decode_block_3bit(&blk3, chs).expect("3-bit reference decode");
+        assert_eq!(decoded3.len(), total3);
+
+        // QT (channel cap is 8, matching the WAV legs).
+        let totalq = QT_SAMPLES_PER_BLOCK * chs;
+        let pcmq = rng.pcm(totalq);
+        let mut statesq = vec![hostile; chs];
+        let blkq = encoder::ima_qt_encode_block_reference(&pcmq, chs, &mut statesq)
+            .unwrap_or_else(|e| panic!("round {round}: QT reference rejected valid shape: {e:?}"));
+        assert_eq!(blkq.len(), QT_BLOCK_BYTES_PER_CHANNEL * chs);
+        let decodedq =
+            oxideav_adpcm::ima_qt::decode_block(&blkq, chs).expect("QT reference decode");
+        assert_eq!(decodedq.len(), totalq);
+    }
+}
+
+#[test]
+fn ima_reference_registry_encoder_survives_random_frame_chops() {
+    // Full-range random PCM through the `quantizer=reference` registry
+    // encoders under random frame chops: never panics, and the total
+    // byte stream is identical to a one-shot run over the same PCM (the
+    // carried state must be chop-invariant).
+    use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame};
+    let mut reg = CodecRegistry::new();
+    oxideav_adpcm::register_codecs(&mut reg);
+    let reg = &reg;
+    for codec_id in [
+        oxideav_adpcm::CODEC_ID_IMA_WAV,
+        oxideav_adpcm::CODEC_ID_IMA_QT,
+    ] {
+        for bits in [4u8, 3] {
+            if bits == 3 && codec_id == oxideav_adpcm::CODEC_ID_IMA_QT {
+                continue; // QT has no 3-bit mode
+            }
+            let mut rng = Lcg::new(0x00AD_C0DE ^ (bits as u64) << 32);
+            let total = 4_000usize;
+            let pcm = rng.pcm(total);
+            let run = |chop: bool| -> Vec<u8> {
+                let mut p = CodecParameters::audio(CodecId::new(codec_id));
+                p.sample_rate = Some(22_050);
+                p.channels = Some(1);
+                p.options.insert("quantizer", "reference");
+                if bits == 3 {
+                    p.options.insert("bits_per_sample", "3");
+                }
+                let mut enc = reg.first_encoder(&p).unwrap();
+                let mut off = 0usize;
+                let mut r = Lcg::new(0x5EED ^ bits as u64);
+                while off < total {
+                    let take = if chop {
+                        1 + (r.next_u64() as usize % 700).min(total - off - 1)
+                    } else {
+                        total - off
+                    }
+                    .min(total - off);
+                    let bytes: Vec<u8> = pcm[off..off + take]
+                        .iter()
+                        .flat_map(|s| s.to_le_bytes())
+                        .collect();
+                    enc.send_frame(&Frame::Audio(AudioFrame {
+                        samples: take as u32,
+                        pts: Some(off as i64),
+                        data: vec![bytes],
+                    }))
+                    .unwrap();
+                    off += take;
+                }
+                enc.flush().unwrap();
+                let mut out = Vec::new();
+                while let Ok(pkt) = enc.receive_packet() {
+                    out.extend_from_slice(&pkt.data);
+                }
+                out
+            };
+            let whole = run(false);
+            let chopped = run(true);
+            assert_eq!(
+                whole, chopped,
+                "{codec_id} bits={bits}: reference stream not chop-invariant"
+            );
+            assert!(!whole.is_empty());
+        }
+    }
+}
+
 // ---------- MS-ADPCM encoder ----------
 
 #[test]
