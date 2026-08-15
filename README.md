@@ -28,7 +28,9 @@ and are not re-implemented here.
 The block-oriented WAV encoders (MS, IMA-WAV, IMA-QT) use the
 decoder-loop search — each input sample evaluates all candidate nibbles
 by simulating the decoder forward and emits the one minimising absolute
-error. The MS-ADPCM encoder additionally trial-encodes each block under
+error. The two IMA encoders alternatively speak the **published
+reference compressor** via the `quantizer` codec option (see below).
+The MS-ADPCM encoder additionally trial-encodes each block under
 all seven spec predictor coefficient pairs and writes the
 lowest-error index (a pure quality gain — the index travels in the block
 header so the decode is unchanged). All three block encoders seed their
@@ -89,6 +91,32 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   Both exclude the leading `cbSize` word (the crate's `extradata`
   convention — the muxer prepends `cbSize = len`), and the MS output
   round-trips straight back through `parse_extradata_coeffs`.
+- **IMA reference ladder compressor (`quantizer` option)** — the IMA
+  "Recommended Practices" Rev 3.00 publishes its reference compression
+  procedure in full (Appendix D §6.1, with worked examples; the DVI
+  Wave Type specification lists the matching 4-bit and 3-bit encode
+  procedures), and the IMA-WAV / IMA-QT encoders now implement it as an
+  alternative to the default search: `quantizer=reference` on the
+  registry path, `ima_wav::ima_quantize_nibble` / `ima_quantize_code3`
+  per-sample and `encoder::ima_encode_block_reference` /
+  `ima_encode_block_3bit_reference` / `ima_qt_encode_block_reference`
+  at block level (per-channel `ima_wav::ImaCodecState` carried by the
+  caller). The ladder quantizes by successive threshold subtraction and
+  advances state through the published expansion, so encode is the
+  bit-exact inverse of decode by construction; the step index is
+  cleared once before the first block and **carried across block
+  boundaries** (each header records the previous block's end index),
+  and there is no heuristic seeding — the byte stream is fully
+  determined by the input, i.e. interchange-exact with any other
+  conforming reference compressor. `tests/ima_reference.rs` pins the
+  implementation against independent re-transcriptions of both
+  listings (worked examples, dense state grids, an exhaustive
+  index × code sweep, a 200k-sample lockstep walk, and byte-exact
+  block/stream assembly for all three shapes); the opaque-validator
+  harness proves an independent decoder reconstructs reference-mode
+  streams, cross-block index carry included. The search stays the
+  default because it is never worse and usually better on error; the
+  reference mode is for interchange determinism and conformance work.
 - **3-bit IMA / DVI ADPCM** — WAV tag `0x0011` defines both 4-bit (the
   default) and 3-bit code widths. The 3-bit mode shares the block header
   and 89-entry step table but uses a 1-sign + 2-magnitude code, its own
@@ -254,7 +282,15 @@ structured-malformation coverage across all seven variants: out-of-spec
 predictor / step-index bytes, truncated-block prefixes, and
 pseudo-random byte streams through both the block-level and
 `Decoder` / `Encoder` trait paths — every input returns `Ok` or `Err`,
-never panics or overflows in a debug build. The MS decode/encode
+never panics or overflows in a debug build. The IMA reference-quantizer
+legs add hostile carried-state seeds (arbitrary predictor, far
+out-of-range step index — clamped on entry) across 1..=8 channels with
+every output re-parsed by the matching block decoder, plus
+random-frame-chop runs through the `quantizer=reference` registry
+encoders pinned byte-identical to the one-shot stream; the
+`encode_packet_ima_wav` / `encode_packet_ima_qt` coverage-guided
+targets carry matching search + reference legs (4-bit and 3-bit) and
+ran bounded sessions (~0.3M / ~9M execs) with zero findings. The MS decode/encode
 recurrences run in i64 with saturating multiplication + final clamp, and
 the Yamaha ADPCM-A path clamps `step_index` / `acc` to spec range on
 entry, so adversarial state emits bounded samples instead of panicking.
@@ -375,8 +411,11 @@ constants (uncopyrightable facts).
   layout is transcribed from the archived WAVE-format-type enumeration
   staged at `docs/audio/adpcm/sdl_sound-wave-types.html`.
 - **IMA ADPCM** — the 89-entry step-size and 16-entry index-adjust
-  tables from the Interactive Multimedia Association "Recommended
-  Practices for Digital Audio".
+  tables, plus the Appendix D reference algorithms (§6.1 compression /
+  §6.2 decompression, pinned by the document's own worked examples),
+  from the Interactive Multimedia Association "Recommended Practices
+  for Enhancing Digital Audio Compatibility" Rev 3.00, staged at
+  `docs/audio/adpcm/ima/IMA_ADPCM.pdf`.
 - **3-bit IMA / DVI ADPCM** — the *DVI ADPCM Wave Type* specification
   (Intel, 1992) preserved at `docs/audio/adpcm/sdl_sound-wave-types.html`.
 - **Apple QuickTime IMA ADPCM** — 34-byte fixed block, big-endian 9-bit

@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **IMA reference ladder compressor** — the compression procedure the
+  IMA "Recommended Practices" Rev 3.00 publishes in Appendix D §6.1
+  (and the DVI Wave Type specification's matching 4-bit / 3-bit encode
+  listings) joins the crate as an alternative to the decoder-loop
+  search: `ima_wav::ima_quantize_nibble` / `ima_quantize_code3`
+  quantize by successive threshold subtraction and advance the shared
+  `(predictor, step_index)` state through the published expansion, so
+  encode is the bit-exact inverse of decode by construction. The §6.1
+  and §6.2 worked examples are pinned byte-for-byte.
+- **Reference block encoders with cross-block index carry** —
+  `encoder::ima_encode_block_reference` /
+  `ima_encode_block_3bit_reference` / `ima_qt_encode_block_reference`
+  follow the specification's stream shape exactly: header predictor is
+  `Samp0` verbatim (top-9-bit form in the QT preamble), no heuristic
+  seeding, and the new public `ima_wav::ImaCodecState` (one per
+  channel, caller-held) carries the step index across blocks — cleared
+  once before the first block, each header recording the previous
+  block's end index — so the byte stream is fully determined by the
+  input (interchange-exact). Hostile carried indices are clamped to
+  the header-representable 0..=88 on entry.
+- **`quantizer` codec option (IMA-WAV / IMA-QT encoders)** — `search`
+  (default; unchanged) or `reference` selects the strategy on the
+  registry path; `ImaWavEncoder::set_quantizer` /
+  `ImaQtEncoder::set_quantizer` on the direct API. The option is
+  encoder-side only, so the IMA decoders validate and ignore it (an
+  encode→decode pair built from one `CodecParameters` keeps working);
+  other variants reject it. Registry reference streams are pinned
+  byte-identical to the direct block APIs under ragged frame chops.
+- **Reference-compressor conformance suite**
+  (`tests/ima_reference.rs`) — double-entry verification against
+  independent in-test re-transcriptions of both staged listings: the
+  Recommendation's worked examples, step-table boundary rows, dense
+  predictor/sample grids at every step index, an exhaustive
+  index × code × predictor-grid sweep for both widths, a 200k-sample
+  continuously-carried lockstep walk, byte-exact oracle stream
+  assembly (mono + stereo, DVI layout + index carry), QT preamble +
+  body nibbles re-derived through the oracle, and the pin that the
+  default search encoder is never materially worse than the reference
+  (why `search` stays the default).
+- **Reference-mode wire conformance + hostile-input coverage** — the
+  opaque-validator harness decodes reference-ladder streams (mono
+  256-byte-block broadband, stereo 1024, QT CAF) proving an
+  independent decoder honours the cross-block index carry;
+  `tests/encoder_fuzz.rs` adds hostile carried-state and
+  random-frame-chop reference legs; the `encode_packet_ima_wav` /
+  `encode_packet_ima_qt` fuzz targets grow search + reference legs
+  (including the previously-unfuzzed 3-bit encoder) and ran bounded
+  coverage-guided sessions (~0.3M / ~9M execs) with zero findings.
+
 - **G.726 VBR conformance — staged demo reference reproduced
   bit-exactly** (`tests/g726_vbr_conformance.rs`). The staged VBR demo
   reference set (`docs/audio/adpcm/g726/conformance/voice*`, schedule
