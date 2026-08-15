@@ -27,8 +27,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use oxideav_adpcm::encoder::{
-    encode_block as ms_encode_block, ima_encode_block, ima_qt_encode_block,
+    encode_block as ms_encode_block, ima_encode_block, ima_encode_block_reference,
+    ima_qt_encode_block, ima_qt_encode_block_reference,
 };
+use oxideav_adpcm::ima_wav::ImaCodecState;
 use oxideav_adpcm::{ima_qt, Variant};
 
 fn fixtures_dir() -> PathBuf {
@@ -279,7 +281,7 @@ fn encoder_validate_wav(
     block_size: usize,
     spb_frames: usize,
     pcm: &[i16],
-    encode: impl Fn(&[i16]) -> Vec<u8>,
+    mut encode: impl FnMut(&[i16]) -> Vec<u8>,
     fmt_ext: &[u8],
     min_xcorr: f64,
 ) {
@@ -477,7 +479,13 @@ fn build_caf(channels: u16, sample_rate: f64, data: &[u8]) -> Vec<u8> {
 
 /// Encode `pcm` (interleaved, `channels` lanes) into `ima4` blocks, wrap
 /// in a CAF, decode via the validator, and check each lane.
-fn encoder_validate_ima_qt(tag_label: &str, channels: usize, pcm: &[i16], min_xcorr: f64) {
+fn encoder_validate_ima_qt(
+    tag_label: &str,
+    channels: usize,
+    pcm: &[i16],
+    mut encode: impl FnMut(&[i16]) -> Vec<u8>,
+    min_xcorr: f64,
+) {
     if !have_validator() {
         eprintln!("validator absent — skipping encoder-validate {tag_label}");
         return;
@@ -491,7 +499,7 @@ fn encoder_validate_ima_qt(tag_label: &str, channels: usize, pcm: &[i16], min_xc
         if chunk.len() < block_samples {
             break;
         }
-        let blk = ima_qt_encode_block(chunk, channels).unwrap();
+        let blk = encode(chunk);
         assert_eq!(
             blk.len(),
             ima_qt::QT_BLOCK_SIZE * channels,
@@ -533,13 +541,25 @@ fn encoder_validate_ima_qt(tag_label: &str, channels: usize, pcm: &[i16], min_xc
 #[test]
 fn ima_qt_mono_encoder_bytes_decode_in_validator() {
     let pcm = sine_pcm(ima_qt::QT_SAMPLES_PER_BLOCK * 20, 440.0, 22050.0, 9000.0);
-    encoder_validate_ima_qt("ima_qt_mono", 1, &pcm, 0.97);
+    encoder_validate_ima_qt(
+        "ima_qt_mono",
+        1,
+        &pcm,
+        |chunk| ima_qt_encode_block(chunk, 1).unwrap(),
+        0.97,
+    );
 }
 
 #[test]
 fn ima_qt_stereo_encoder_bytes_decode_in_validator() {
     let pcm = interleaved_sine(2, ima_qt::QT_SAMPLES_PER_BLOCK * 20, 440.0, 22050.0, 9000.0);
-    encoder_validate_ima_qt("ima_qt_stereo", 2, &pcm, 0.97);
+    encoder_validate_ima_qt(
+        "ima_qt_stereo",
+        2,
+        &pcm,
+        |chunk| ima_qt_encode_block(chunk, 2).unwrap(),
+        0.97,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -597,8 +617,81 @@ fn ima_wav_broadband_small_block_encoder_bytes_decode_in_validator() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Reference-quantizer wire conformance.
+//
+// The Appendix D §6.1 ladder is the interchange compressor: its streams
+// carry the step index across blocks (each header records the previous
+// block's end index) with no crate-specific seeding. These cases prove an
+// independent decoder honours that stream shape — the cross-block index
+// carry in particular — on broadband content, mono and stereo.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ima_wav_reference_encoder_bytes_decode_in_validator() {
+    let block_size = 256usize;
+    let spb = Variant::ImaWav
+        .samples_per_block(1, block_size)
+        .expect("IMA-WAV reference block geometry");
+    let pcm = broadband_pcm(spb * 8, 22050.0, 8000.0);
+    let ext = ima_wav_fmt_ext(1, block_size as u16);
+    let mut states = vec![ImaCodecState::default(); 1];
+    encoder_validate_wav(
+        "ima_wav_reference",
+        0x0011,
+        1,
+        block_size,
+        spb,
+        &pcm,
+        |chunk| ima_encode_block_reference(chunk, 1, block_size, &mut states).unwrap(),
+        &ext,
+        0.92,
+    );
+}
+
+#[test]
+fn ima_wav_reference_stereo_encoder_bytes_decode_in_validator() {
+    let block_size = 1024usize;
+    let spb = Variant::ImaWav
+        .samples_per_block(2, block_size)
+        .expect("IMA-WAV reference stereo geometry");
+    let pcm = interleaved_sine(2, spb * 6, 440.0, 22050.0, 9000.0);
+    let ext = ima_wav_fmt_ext(2, block_size as u16);
+    let mut states = vec![ImaCodecState::default(); 2];
+    encoder_validate_wav(
+        "ima_wav_reference_stereo",
+        0x0011,
+        2,
+        block_size,
+        spb,
+        &pcm,
+        |chunk| ima_encode_block_reference(chunk, 2, block_size, &mut states).unwrap(),
+        &ext,
+        0.97,
+    );
+}
+
+#[test]
+fn ima_qt_reference_encoder_bytes_decode_in_validator() {
+    let pcm = broadband_pcm(ima_qt::QT_SAMPLES_PER_BLOCK * 24, 22050.0, 8000.0);
+    let mut states = vec![ImaCodecState::default(); 1];
+    encoder_validate_ima_qt(
+        "ima_qt_reference",
+        1,
+        &pcm,
+        |chunk| ima_qt_encode_block_reference(chunk, 1, &mut states).unwrap(),
+        0.92,
+    );
+}
+
 #[test]
 fn ima_qt_broadband_encoder_bytes_decode_in_validator() {
     let pcm = broadband_pcm(ima_qt::QT_SAMPLES_PER_BLOCK * 24, 22050.0, 8000.0);
-    encoder_validate_ima_qt("ima_qt_broadband", 1, &pcm, 0.92);
+    encoder_validate_ima_qt(
+        "ima_qt_broadband",
+        1,
+        &pcm,
+        |chunk| ima_qt_encode_block(chunk, 1).unwrap(),
+        0.92,
+    );
 }
