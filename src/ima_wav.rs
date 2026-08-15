@@ -45,6 +45,23 @@
 use crate::tables::{IMA3_INDEX_ADJUST, IMA_INDEX_ADJUST, IMA_STEP_SIZE};
 use oxideav_core::{Error, Result};
 
+/// The IMA codec state pair shared by every expansion / quantization
+/// entry point in this module: the running reconstruction (`predictor`,
+/// clamped to the i16 range) and the step-table index (`step_index`,
+/// clamped to `0..=88`).
+///
+/// [`crate::encoder::ima_encode_block_reference`] and friends carry one
+/// of these per channel **across blocks** — the reference compressor
+/// clears the index only once, before the first block, and each block
+/// header then records the index the previous block ended on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ImaCodecState {
+    /// Running reconstructed sample (the decoder's predictor).
+    pub predictor: i32,
+    /// Step-size table index, `0..=88`.
+    pub step_index: i32,
+}
+
 /// Expand one 4-bit nibble into the next PCM sample for a given channel.
 ///
 /// Tracks and updates `predictor` (i32, clamped to i16 range on output)
@@ -118,6 +135,86 @@ pub fn ima_expand_code3(predictor: &mut i32, step_index: &mut i32, code: u8) -> 
     *step_index = (*step_index).clamp(0, 88);
 
     *predictor as i16
+}
+
+/// Quantize one PCM sample into a 4-bit IMA code with the
+/// **reference ladder compressor** — the compression algorithm the IMA
+/// "Recommended Practices" Rev 3.00 publishes in Appendix D §6.1
+/// (identical to the *DVI ADPCM Wave Type* specification's 4-bit
+/// encoding procedure).
+///
+/// The ladder quantizes `sample - predictor` against the current step
+/// by three successive threshold comparisons (`step`, `step/2`,
+/// `step/4`, each subtracted when met), producing a sign-magnitude
+/// code, then advances the shared `(predictor, step_index)` state
+/// through [`ima_expand_nibble`] — the §6.2 expansion — exactly as the
+/// listing prescribes ("uncompressed using the same quantization
+/// stepsize to obtain a linear difference identical to that calculated
+/// by the decompressor"). Encode is therefore bit-exactly the inverse
+/// of decode *by construction*: feeding the returned code to
+/// [`ima_expand_nibble`] from the same start state reproduces this
+/// function's post-state.
+///
+/// This is the deterministic interchange compressor: unlike the
+/// error-minimising search the frame encoders default to, the ladder's
+/// output for a given input stream is exactly the byte stream every
+/// other Appendix-D-conforming compressor produces.
+#[inline]
+pub fn ima_quantize_nibble(predictor: &mut i32, step_index: &mut i32, sample: i16) -> u8 {
+    let step = IMA_STEP_SIZE[(*step_index).clamp(0, 88) as usize] as i32;
+    let mut diff = sample as i32 - *predictor;
+    let mut code: u8 = 0;
+    if diff < 0 {
+        code = 8;
+        diff = -diff;
+    }
+    // §6.1 ladder: three iterations against step, step/2, step/4 —
+    // "quantize difference down to four bits ... through repeated
+    // subtraction".
+    let mut temp = step;
+    let mut mask: u8 = 4;
+    for _ in 0..3 {
+        if diff >= temp {
+            code |= mask;
+            diff -= temp;
+        }
+        temp >>= 1;
+        mask >>= 1;
+    }
+    // Advance state through the published expansion (§6.2) so the
+    // encoder-side reconstruction is identical to the decoder's.
+    let _ = ima_expand_nibble(predictor, step_index, code);
+    code
+}
+
+/// Quantize one PCM sample into a 3-bit IMA/DVI code with the
+/// **reference ladder compressor** — the 3-bit encoding procedure of
+/// the *DVI ADPCM Wave Type* specification (the `wBitsPerSample = 3`
+/// mode of WAV tag `0x0011`).
+///
+/// The 3-bit ladder is two threshold comparisons (`step`, `step/2`)
+/// after the sign split; state advances through [`ima_expand_code3`]
+/// (the specification's own expansion) so encode is bit-exactly the
+/// inverse of decode by construction, as in the 4-bit
+/// [`ima_quantize_nibble`].
+#[inline]
+pub fn ima_quantize_code3(predictor: &mut i32, step_index: &mut i32, sample: i16) -> u8 {
+    let step = IMA_STEP_SIZE[(*step_index).clamp(0, 88) as usize] as i32;
+    let mut diff = sample as i32 - *predictor;
+    let mut code: u8 = 0;
+    if diff < 0 {
+        code = 4;
+        diff = -diff;
+    }
+    if diff >= step {
+        code |= 2;
+        diff -= step;
+    }
+    if diff >= step >> 1 {
+        code |= 1;
+    }
+    let _ = ima_expand_code3(predictor, step_index, code);
+    code
 }
 
 /// Per-channel body bytes in one 3-bit interleave group: three 32-bit
@@ -528,6 +625,161 @@ mod tests {
         // own seeds — confirms per-channel state isolation.
         assert_eq!(pcm[2], 101);
         assert_eq!(pcm[3], 201);
+    }
+
+    #[test]
+    fn quantize_nibble_reproduces_the_recommendation_worked_example() {
+        // Appendix D §6.1 worked example: originalSample = 0x873F,
+        // predictedSample = 0x8700, stepsize = 73 (index 24) →
+        // newSample = 3, predictedSample' = 0x873F, index' = 23,
+        // stepsize' = 66.
+        assert_eq!(IMA_STEP_SIZE[24], 73, "step table row 24");
+        let mut predictor = 0x8700u16 as i16 as i32; // -30976
+        let mut step_index = 24i32;
+        let sample = 0x873Fu16 as i16; // -30913
+        let code = ima_quantize_nibble(&mut predictor, &mut step_index, sample);
+        assert_eq!(code, 3, "worked-example code");
+        assert_eq!(
+            predictor, 0x873Fu16 as i16 as i32,
+            "worked-example predictor"
+        );
+        assert_eq!(step_index, 23, "worked-example index");
+        assert_eq!(IMA_STEP_SIZE[23], 66, "worked-example next stepsize");
+    }
+
+    #[test]
+    fn expand_nibble_reproduces_the_recommendation_worked_example() {
+        // Appendix D §6.2 worked example: originalSample (code) = 0x3,
+        // newSample[previous] = 0x8700, stepsize = 73 (index 24) →
+        // newSample = 0x873F, index' = 23, stepsize' = 66.
+        let mut predictor = 0x8700u16 as i16 as i32;
+        let mut step_index = 24i32;
+        let s = ima_expand_nibble(&mut predictor, &mut step_index, 0x3);
+        assert_eq!(s, 0x873Fu16 as i16, "worked-example expansion");
+        assert_eq!(step_index, 23);
+        assert_eq!(IMA_STEP_SIZE[23], 66);
+    }
+
+    #[test]
+    fn quantize_nibble_state_advance_is_exactly_the_expansion() {
+        // By construction the quantizer advances through the §6.2
+        // expansion; pin it against an explicit expand call from the
+        // same start state, across a state/sample sweep.
+        let mut x = 0x2545F1u64;
+        let mut rng = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..20_000 {
+            let p0 = (rng() as i16) as i32;
+            let si0 = (rng() % 89) as i32;
+            let sample = rng() as i16;
+
+            let mut pq = p0;
+            let mut sq = si0;
+            let code = ima_quantize_nibble(&mut pq, &mut sq, sample);
+            assert!(code < 16);
+
+            let mut pe = p0;
+            let mut se = si0;
+            let _ = ima_expand_nibble(&mut pe, &mut se, code);
+            assert_eq!((pq, sq), (pe, se), "quantizer state != expansion state");
+        }
+    }
+
+    #[test]
+    fn quantize_code3_state_advance_is_exactly_the_expansion() {
+        let mut x = 0x9E3779B9u64;
+        let mut rng = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        for _ in 0..20_000 {
+            let p0 = (rng() as i16) as i32;
+            let si0 = (rng() % 89) as i32;
+            let sample = rng() as i16;
+
+            let mut pq = p0;
+            let mut sq = si0;
+            let code = ima_quantize_code3(&mut pq, &mut sq, sample);
+            assert!(code < 8);
+
+            let mut pe = p0;
+            let mut se = si0;
+            let _ = ima_expand_code3(&mut pe, &mut se, code);
+            assert_eq!(
+                (pq, sq),
+                (pe, se),
+                "3-bit quantizer state != expansion state"
+            );
+        }
+    }
+
+    #[test]
+    fn quantize_nibble_sign_and_magnitude_selection() {
+        // Zero difference → code 0 (positive sign, zero magnitude).
+        let mut p = 1000i32;
+        let mut si = 30i32;
+        assert_eq!(ima_quantize_nibble(&mut p, &mut si, 1000), 0);
+        // Large positive difference at a small step saturates to 7.
+        let mut p = 0i32;
+        let mut si = 0i32; // step 7
+        assert_eq!(ima_quantize_nibble(&mut p, &mut si, 20_000), 7);
+        // Large negative difference saturates to 0xF.
+        let mut p = 0i32;
+        let mut si = 0i32;
+        assert_eq!(ima_quantize_nibble(&mut p, &mut si, -20_000), 0xF);
+        // Exactly one step below → sign bit + magnitude-4 (code 0xC):
+        // step at index 20 is 50; diff = -50 meets the first threshold
+        // and leaves nothing for the finer rungs.
+        let mut p = 0i32;
+        let mut si = 20i32;
+        assert_eq!(IMA_STEP_SIZE[20], 50);
+        assert_eq!(ima_quantize_nibble(&mut p, &mut si, -50), 0xC);
+    }
+
+    #[test]
+    fn quantize_code3_sign_and_magnitude_selection() {
+        let mut p = 500i32;
+        let mut si = 30i32;
+        assert_eq!(ima_quantize_code3(&mut p, &mut si, 500), 0);
+        let mut p = 0i32;
+        let mut si = 0i32;
+        assert_eq!(ima_quantize_code3(&mut p, &mut si, 20_000), 3);
+        let mut p = 0i32;
+        let mut si = 0i32;
+        assert_eq!(ima_quantize_code3(&mut p, &mut si, -20_000), 7);
+        // step at index 20 is 50; diff = +50 → magnitude bit 1 only.
+        let mut p = 0i32;
+        let mut si = 20i32;
+        assert_eq!(ima_quantize_code3(&mut p, &mut si, 50), 2);
+    }
+
+    #[test]
+    fn quantize_nibble_converges_on_a_sine() {
+        // The ladder + adaptation pair converges: after the cold-start
+        // attack (index seeds at 0 → step 7, so the first few samples
+        // lag a fast-moving target) the reconstruction tracks a
+        // 6000-amplitude sine with a bounded RMS error.
+        let mut p = 0i32;
+        let mut si = 0i32;
+        let mut sse = 0f64;
+        let mut n = 0f64;
+        for i in 0..2_000 {
+            let target = ((i as f64 / 40.0).sin() * 6000.0) as i16;
+            let _ = ima_quantize_nibble(&mut p, &mut si, target);
+            if i >= 100 {
+                let e = p as f64 - target as f64;
+                sse += e * e;
+                n += 1.0;
+            }
+        }
+        let rms = (sse / n).sqrt();
+        assert!(rms < 200.0, "post-warm-up RMS {rms} exceeds 200");
     }
 
     #[test]
