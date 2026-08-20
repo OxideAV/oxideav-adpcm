@@ -68,7 +68,7 @@ use crate::tables::{
 use crate::yamaha;
 use crate::yamaha_a;
 use oxideav_core::{
-    AudioFrame, CodecId, CodecParameters, Encoder, Error, Frame, Packet, Result, TimeBase,
+    AudioFrame, CodecId, CodecParameters, CodecTag, Encoder, Error, Frame, Packet, Result, TimeBase,
 };
 
 /// Default per-channel block size in bytes for the WAV/AVI block-oriented
@@ -401,6 +401,10 @@ pub struct MsEncoder {
     output_params: CodecParameters,
     channels: usize,
     block_size: usize,
+    // Whether the caller supplied `extradata` at construction. When
+    // false the encoder owns the field and rewrites the muxer-facing
+    // ADPCMWAVEFORMAT trailer whenever the block geometry changes.
+    caller_extradata: bool,
     pcm: Vec<i16>, // interleaved buffer
     pending: VecDeque<Packet>,
     samples_emitted: i64,
@@ -409,9 +413,31 @@ pub struct MsEncoder {
 
 impl MsEncoder {
     /// Override the per-channel block size *before* the first
-    /// `send_frame` call.
+    /// `send_frame` call. Re-derives the muxer-facing
+    /// `ADPCMWAVEFORMAT` trailer on `output_params` (unless the caller
+    /// supplied its own `extradata`).
     pub fn set_block_size(&mut self, block_size: usize) {
         self.block_size = block_size;
+        self.refresh_container_fields();
+    }
+
+    /// Populate the muxer-facing container fields on `output_params`
+    /// per the core `CodecParameters::tag` contract: the canonical wire
+    /// tag (`WAVE_FORMAT_ADPCM` = 0x0002; only when the caller left
+    /// `tag` unset, so an alias tag round-trips untouched) and the
+    /// `ADPCMWAVEFORMAT` trailer (`wSamplesPerBlock` + the seven
+    /// standard `aCoeff[]` pairs) matching the current block geometry.
+    fn refresh_container_fields(&mut self) {
+        if self.output_params.tag.is_none() {
+            self.output_params.tag = Some(CodecTag::wave_format(0x0002));
+        }
+        if !self.caller_extradata {
+            self.output_params.extradata = crate::Variant::Ms
+                .samples_per_block(self.channels as u16, self.block_size)
+                .and_then(|spb| u16::try_from(spb).ok())
+                .and_then(|spb| crate::ms::build_extradata(spb, &crate::ms::STANDARD_COEFFS).ok())
+                .unwrap_or_default();
+        }
     }
 
     fn samples_per_block(&self) -> usize {
@@ -1035,6 +1061,10 @@ pub struct ImaWavEncoder {
     channels: usize,
     block_size: usize,
     bits_per_sample: u8,
+    // Whether the caller supplied `extradata` at construction. When
+    // false the encoder owns the field and rewrites the muxer-facing
+    // DVIADPCMWAVEFORMAT trailer whenever the block geometry changes.
+    caller_extradata: bool,
     quantizer: Quantizer,
     /// Per-channel codec state for [`Quantizer::Reference`] — carried
     /// across blocks per the specification (index cleared once, before
@@ -1049,6 +1079,24 @@ pub struct ImaWavEncoder {
 impl ImaWavEncoder {
     pub fn set_block_size(&mut self, block_size: usize) {
         self.block_size = block_size;
+        self.refresh_container_fields();
+    }
+
+    /// Populate the muxer-facing container fields on `output_params`:
+    /// the canonical wire tag (`WAVE_FORMAT_DVI_ADPCM` = 0x0011; only
+    /// when the caller left `tag` unset) and the `DVIADPCMWAVEFORMAT`
+    /// trailer (the `wSamplesPerBlock` word) for the current block
+    /// geometry and code width.
+    fn refresh_container_fields(&mut self) {
+        if self.output_params.tag.is_none() {
+            self.output_params.tag = Some(CodecTag::wave_format(0x0011));
+        }
+        if !self.caller_extradata {
+            self.output_params.extradata = u16::try_from(self.samples_per_block())
+                .ok()
+                .map(|spb| spb.to_le_bytes().to_vec())
+                .unwrap_or_default();
+        }
     }
     /// Select the nibble-selection strategy (see [`Quantizer`]). Call
     /// *before* the first `send_frame`; the reference compressor's
@@ -1078,6 +1126,7 @@ impl ImaWavEncoder {
                 )))
             }
         }
+        self.refresh_container_fields();
         Ok(())
     }
     fn samples_per_block(&self) -> usize {
@@ -1850,15 +1899,18 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                     "adpcm_ms encoder: channels {channels} > 2 not supported"
                 )));
             }
-            Ok(Box::new(MsEncoder {
+            let mut enc = MsEncoder {
                 output_params: params.clone(),
                 channels: channels as usize,
                 block_size: DEFAULT_BLOCK_SIZE,
+                caller_extradata: !params.extradata.is_empty(),
                 pcm: Vec::new(),
                 pending: VecDeque::new(),
                 samples_emitted: 0,
                 flushed: false,
-            }))
+            };
+            enc.refresh_container_fields();
+            Ok(Box::new(enc))
         }
         crate::CODEC_ID_IMA_WAV => {
             if channels > 8 {
@@ -1875,6 +1927,7 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 channels: channels as usize,
                 block_size: default_block_size_4bit(channels as usize),
                 bits_per_sample: 4,
+                caller_extradata: !params.extradata.is_empty(),
                 quantizer,
                 ref_states: vec![ima_wav::ImaCodecState::default(); channels as usize],
                 pcm: Vec::new(),
@@ -1882,6 +1935,7 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
                 samples_emitted: 0,
                 flushed: false,
             };
+            enc.refresh_container_fields();
             // `bits_per_sample` codec option (WAVEFORMATEX
             // wBitsPerSample): "4" (default) or "3".
             if let Some(v) = params.options.get("bits_per_sample") {
@@ -1905,8 +1959,14 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             // encoder (the QT framing wraps the same §6.1 quantizer).
             let quantizer =
                 crate::decoder::parse_ima_quantizer_option(crate::Variant::ImaQt, params)?;
+            // QuickTime addresses ima4 by sample-entry FourCC, not a
+            // WAV tag; no fmt extension exists.
+            let mut output_params = params.clone();
+            if output_params.tag.is_none() {
+                output_params.tag = Some(CodecTag::fourcc(b"ima4"));
+            }
             Ok(Box::new(ImaQtEncoder {
-                output_params: params.clone(),
+                output_params,
                 channels: channels as usize,
                 quantizer,
                 ref_states: vec![ima_wav::ImaCodecState::default(); channels as usize],
@@ -1927,8 +1987,14 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             // state with the matching chip so the bytes it emits decode
             // bit-exactly under the same `chip` option.
             let chip = crate::decoder::parse_yamaha_chip_option(crate::Variant::Yamaha, params)?;
+            // WAVE_FORMAT_YAMAHA_ADPCM; the catalogue defines no fmt
+            // extension fields for it.
+            let mut output_params = params.clone();
+            if output_params.tag.is_none() {
+                output_params.tag = Some(CodecTag::wave_format(0x0020));
+            }
             Ok(Box::new(YamahaEncoder {
-                output_params: params.clone(),
+                output_params,
                 channels: channels as usize,
                 state: vec![yamaha::Channel::for_chip(chip); channels as usize],
                 pending: VecDeque::new(),
@@ -1958,8 +2024,18 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             // packs in that order so the matching decoder reads it back.
             let order =
                 crate::decoder::parse_dialogic_order_option(crate::Variant::Dialogic, params)?;
+            // Canonical WAVE_FORMAT_OKI_ADPCM (an alias tag supplied by
+            // the caller wins), plus the OKIADPCMWAVEFORMAT wPole = 0
+            // (no emphasis) trailer.
+            let mut output_params = params.clone();
+            if output_params.tag.is_none() {
+                output_params.tag = Some(CodecTag::wave_format(0x0010));
+            }
+            if output_params.extradata.is_empty() {
+                output_params.extradata = dialogic::wav_format_extra(0).to_vec();
+            }
             Ok(Box::new(DialogicEncoder {
-                output_params: params.clone(),
+                output_params,
                 state: vec![dialogic::Channel::default(); channels as usize],
                 channels: channels as usize,
                 order,
@@ -2031,8 +2107,30 @@ pub(crate) fn make_encoder(params: &CodecParameters) -> Result<Box<dyn Encoder>>
             // decoder factory's COMPRESS + SYNC output chain).
             let law = crate::decoder::parse_g726_law_option(crate::Variant::G726, params)?;
             let lanes = if wav_framing { channels as usize } else { 1 };
+            // Muxer-facing wire tag: under the Antex WAV sub-block
+            // framing the 4-bit rate is WAVE_FORMAT_G721_ADPCM (0x0040)
+            // and the 3-/5-bit rates are WAVE_FORMAT_G723_ADPCM
+            // (0x0014); the raw bit-continuous stream carries the tag
+            // common tools write for it (0x0045). The aux-free WAV
+            // form also gets its one-field fmt extension
+            // (nAuxBlockSize = 0). Caller-supplied values win.
+            let mut output_params = params.clone();
+            if output_params.tag.is_none() {
+                output_params.tag = Some(CodecTag::wave_format(if wav_framing {
+                    if rate.bits() == 4 {
+                        0x0040
+                    } else {
+                        0x0014
+                    }
+                } else {
+                    0x0045
+                }));
+            }
+            if wav_framing && output_params.extradata.is_empty() {
+                output_params.extradata = g726::wav_format_extra(0).to_vec();
+            }
             Ok(Box::new(G726Encoder {
-                output_params: params.clone(),
+                output_params,
                 states: vec![g726::State::new(rate); lanes],
                 packer: g726::BitPacker::new(order),
                 law,

@@ -28,6 +28,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and tagless parameters keep `framing=raw`. An explicit `framing`
   option always wins (`decoder::g726_default_framing` exposes the rule
   to tests).
+- **Encoders advertise muxer-facing container fields** — per the core
+  `CodecParameters::tag` contract, every encoder's `output_params` now
+  carries the canonical wire tag (`0x0002` MS, `0x0011` IMA-WAV,
+  `ima4` FourCC for IMA-QT, `0x0020` Yamaha-B, `0x0010` Dialogic;
+  G.726: `0x0040`/`0x0014` by rate under `framing=wav`, `0x0045` raw)
+  and, where the WAV carriage defines one, the `fmt ` extension body as
+  `extradata` (the full `ADPCMWAVEFORMAT` trailer for MS, the
+  `wSamplesPerBlock` word for IMA-WAV — re-derived by `set_block_size`
+  / `set_bits_per_sample` — the `wPole = 0` word for Dialogic, the
+  aux-free `nAuxBlockSize = 0` word for G.726 `framing=wav`).
+  Caller-supplied tag / extradata always win, so a demuxed alias tag
+  round-trips untouched. A decoder built straight from an encoder's
+  `output_params` now splits a whole multi-block stream correctly with
+  no hand-set options (pinned in `tests/encoder_container_fields.rs`).
 - **`OKIADPCMWAVEFORMAT` (`wPole`) extension support** — the staged
   catalogue's OKI-in-WAV entry defines a single `WORD wPole` ("high
   frequency emphasis value", `cbSize = 2`) after the `WAVEFORMATEX`
