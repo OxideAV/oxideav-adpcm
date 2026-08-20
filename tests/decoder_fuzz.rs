@@ -969,3 +969,103 @@ fn g726_decode_law_never_panics_on_random_codes() {
 fn _decoder_import_anchor() {
     let _ = std::mem::size_of::<decoder::AdpcmDecoder>();
 }
+
+// ----- factory extradata hostile inputs ------------------------------
+//
+// The decoder factory derives block framing from the wSamplesPerBlock
+// word of the documented fmt trailers when it arrives via
+// `CodecParameters::extradata`. Arbitrary trailers must construct or
+// error cleanly — never panic — and a constructed decoder must survive
+// arbitrary packets afterwards.
+
+#[test]
+fn factory_hostile_extradata_never_panics() {
+    let mut reg = CodecRegistry::new();
+    register_codecs(&mut reg);
+    let mut rng = Lcg::new(0x5EED_E57A);
+    for codec in [
+        CODEC_ID_MS,
+        CODEC_ID_IMA_WAV,
+        CODEC_ID_IMA_QT,
+        CODEC_ID_YAMAHA,
+        CODEC_ID_YAMAHA_A,
+        CODEC_ID_DIALOGIC,
+        CODEC_ID_G726,
+    ] {
+        for len in [0usize, 1, 2, 3, 4, 8, 17, 32, 33, 64] {
+            for _ in 0..8 {
+                let mut extradata = vec![0u8; len];
+                rng.fill(&mut extradata);
+                let mut params = CodecParameters::audio(CodecId::new(codec));
+                params.sample_rate = Some(8_000);
+                params.channels = Some(1);
+                params.extradata = extradata;
+                // Construction may succeed or fail (structurally bad
+                // trailers error) — it must never panic; and when it
+                // succeeds, feeding random bytes must not panic either.
+                if let Ok(mut dec) = reg.first_decoder(&params) {
+                    let mut pkt_data = vec![0u8; 96];
+                    rng.fill(&mut pkt_data);
+                    let pkt = Packet::new(0, TimeBase::new(1, 8_000), pkt_data);
+                    let _ = dec.send_packet(&pkt);
+                    let _ = dec.receive_frame();
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn factory_extreme_samples_per_block_trailers_are_bounded() {
+    // The two boundary wSamplesPerBlock values: 0 (treated as absent —
+    // some writers zero the field) and 65529 — the largest u16 value
+    // on the IMA-WAV mono lattice (65529 = 1 + 8·8191; u16::MAX itself
+    // is off-lattice and rejected below). The derived block size stays
+    // within a few dozen KiB and decode of a small packet still works,
+    // treating it as a single short block.
+    let mut reg = CodecRegistry::new();
+    register_codecs(&mut reg);
+    for spb in [0u16, 65529] {
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_IMA_WAV));
+        params.sample_rate = Some(8_000);
+        params.channels = Some(1);
+        params.extradata = spb.to_le_bytes().to_vec();
+        let mut dec = reg
+            .first_decoder(&params)
+            .unwrap_or_else(|e| panic!("spb={spb}: factory rejected boundary trailer: {e:?}"));
+        // A single well-formed 12-byte block (4B header + 8B body).
+        let pkt = Packet::new(0, TimeBase::new(1, 8_000), vec![0u8; 12]);
+        dec.send_packet(&pkt).unwrap();
+        let _ = dec.receive_frame();
+    }
+    // Off-lattice non-zero values are structural errors, not panics.
+    for spb in [2u16, 7, 100, u16::MAX] {
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_IMA_WAV));
+        params.sample_rate = Some(8_000);
+        params.channels = Some(1);
+        params.extradata = spb.to_le_bytes().to_vec();
+        assert!(
+            reg.first_decoder(&params).is_err(),
+            "spb={spb} is off the 1+8k lattice and must be rejected"
+        );
+    }
+    // MS: spb=2 is the header-only block (7 bytes/channel) — valid;
+    // spb=3 is off-lattice for mono (odd body nibble count).
+    for (spb, ok) in [(2u16, true), (3, false), (500, true)] {
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_MS));
+        params.sample_rate = Some(8_000);
+        params.channels = Some(1);
+        params.extradata = {
+            // A minimal-but-valid ADPCMWAVEFORMAT trailer with the
+            // chosen wSamplesPerBlock and the standard table.
+            ms::build_extradata(spb, &ms::STANDARD_COEFFS).unwrap()
+        };
+        let r = reg.first_decoder(&params);
+        assert_eq!(
+            r.is_ok(),
+            ok,
+            "MS spb={spb}: factory acceptance mismatch ({:?})",
+            r.err()
+        );
+    }
+}
