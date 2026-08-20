@@ -15,8 +15,8 @@ QuickTime / VOX / FM-synth streams.
 | `adpcm_ima_qt`    | IMA ADPCM — QuickTime variant (mono…7.1, block-interleaved) | QuickTime / MOV (fourcc `ima4`) |
 | `adpcm_yamaha`    | Yamaha ADPCM-B / DELTA-T (Y8950/YM2608-B/YMZ280B/AICA) | WAV tag `0x0020` |
 | `adpcm_yamaha_a`  | Yamaha ADPCM-A (YM2608/YM2610 rhythm channels) | chip-internal; no WAV tag |
-| `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless) **and** WAV tags `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) / `0x0203` (`WAVE_FORMAT_DIALOGIC_OKI_ADPCM`) |
-| `adpcm_g726`      | ITU-T G.726 narrowband ADPCM (40/32/24/16 kbit/s) | telephony / RTP; WAV tags `0x0040` (`WAVE_FORMAT_G721_ADPCM`, 4-bit) / `0x0014` (`WAVE_FORMAT_G723_ADPCM`, the older 3-/5-bit G.723 rates) |
+| `adpcm_dialogic`  | OKI / Dialogic VOX ADPCM      | `.vox` (headerless) **and** WAV tags `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) / `0x0203` + `0x0017` (the catalogue's and RFC 2361 §A.16's `WAVE_FORMAT_DIALOGIC_OKI_ADPCM` assignments) |
+| `adpcm_g726`      | ITU-T G.726 narrowband ADPCM (40/32/24/16 kbit/s) | telephony / RTP; WAV tags `0x0040` (`WAVE_FORMAT_G721_ADPCM`, 4-bit) / `0x0014` (`WAVE_FORMAT_G723_ADPCM`, the older 3-/5-bit G.723 rates) — the Antex sub-block WAV layout — plus the raw bit-continuous WAV tags `0x0045` (the tag common tools write; black-box established) / `0x0064` (`WAVE_FORMAT_G726_ADPCM`, RFC 2361 §A.54) |
 
 G.722 (WAV tag `0x0028`) and G.723.1 / G.729 live in their own crates
 and are not re-implemented here.
@@ -45,6 +45,30 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
 
 ### Notable format details
 
+- **End-to-end WAV tag claiming** — every WAV-carried variant claims
+  its `wFormatTag`s in `register_codecs`, so a demuxer that resolves
+  tags through `oxideav_core::CodecResolver` reaches these decoders
+  directly; `WAVE_FORMAT_EXTENSIBLE` streams need nothing extra here,
+  because a `DEFINE_WAVEFORMATEX_GUID`-template SubFormat is documented
+  as equivalent to its embedded legacy tag (the demuxer folds it back
+  to the same 16-bit claim — the core `CodecTag` has no GUID form by
+  design). The factories reconstruct everything else from what a
+  demuxer can actually pass in `CodecParameters`: the `wSamplesPerBlock`
+  word of the documented `ADPCMWAVEFORMAT` / `DVIADPCMWAVEFORMAT`
+  trailers (via `extradata`) re-derives `nBlockAlign` for multi-block
+  packet splitting, and the on-wire tag (via `CodecParameters::tag`)
+  picks the G.726 framing default — Antex sub-block layout for
+  `0x0040` / `0x0014`, raw bit-continuous stream for `0x0045` /
+  `0x0064` (an explicit `framing` option always wins). The encoders
+  advertise the same fields outward: `output_params` carries the
+  canonical wire tag (caller-supplied alias tags round-trip untouched)
+  and the variant's `fmt ` extension as `extradata`, so a WAV muxer
+  needs no codec-specific knowledge. `tests/wav_tag_e2e.rs` pins the
+  whole chain on real validator-generated WAVs (resolve → build →
+  multi-block decode → cross-correlate), including the EXTENSIBLE fold
+  and both raw G.726 tags; `tests/encoder_container_fields.rs` closes
+  the loop by decoding a concatenated stream through a decoder built
+  straight from `output_params`.
 - **Multi-block packets (`block_align` decode option)** — the
   block-oriented MS and IMA-WAV (4-bit and 3-bit) decoders split a packet
   that carries several concatenated blocks — a whole WAV `data` chunk, an
@@ -261,15 +285,22 @@ typed `Variant` without round-tripping through a codec-id string (tags
 owned by other families — PCM, G.722 — and the two tagless variants
 resolve to `None`); `Shape` (block- vs stream-oriented) is also
 re-exported. `Variant::wave_format_tags()` returns *every* tag a variant
-answers to (canonical first, then any documented alias) and backs both
+answers to (canonical first, then the documented aliases) and backs both
 `wave_format_tag()` and `from_wave_format_tag()`: `Variant::Dialogic`
-answers to both `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) and its `0x0203`
-(`WAVE_FORMAT_DIALOGIC_OKI_ADPCM`) alias — the same 4-bit OKI VOX body —
-and `Variant::G726` answers to both `0x0040` (`WAVE_FORMAT_G721_ADPCM`,
+answers to `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) plus both documented
+`WAVE_FORMAT_DIALOGIC_OKI_ADPCM` assignments — `0x0203` (the archived
+catalogue) and `0x0017` (RFC 2361 §A.16) — all the same 4-bit OKI VOX
+body; and `Variant::G726` answers to `0x0040` (`WAVE_FORMAT_G721_ADPCM`,
 the 4-bit 32 kbit/s rate) and `0x0014` (`WAVE_FORMAT_G723_ADPCM`, the
 older CCITT G.723 ADPCM at 3-bit / 24 kbit/s and 5-bit / 40 kbit/s — the
 1990 Recommendation consolidates both G.721 and G.723, so the tag routes
-the demuxer to this decoder at the rate `wBitsPerSample` selects). Each
+the demuxer to this decoder at the rate `wBitsPerSample` selects; both
+carry the Antex sub-block WAV layout and default the decoder to
+`framing=wav`), plus the two raw bit-continuous G.726-in-WAV tags
+`0x0045` (the tag common tools write — established black-box against
+the opaque validator and pinned in `tests/wav_tag_e2e.rs`) and `0x0064`
+(`WAVE_FORMAT_G726_ADPCM`, RFC 2361 §A.54; the validator decodes it
+byte-identically to `0x0045`). Each
 alias is registered on the codec so `from_wave_format_tag` and the
 container registry stay in lockstep. Lib-side tests pin these accessors against what
 `register_codecs` and the per-block decoders actually do, so a new
@@ -459,14 +490,32 @@ constants (uncopyrightable facts).
   step-pointer adjustment from Dialogic Corporation's *Dialogic ADPCM
   Algorithm* application note (doc 00-1366-001, 1988). Headerless `.vox`
   (caller supplies sample rate) plus the `WAVE_FORMAT_OKI_ADPCM`
-  (`0x0010`) WAV framing, which decodes byte-identically. The MSM6258's
+  (`0x0010`) WAV framing, which decodes byte-identically. The
+  catalogue's `OKIADPCMWAVEFORMAT` `fmt ` extension — a single
+  `WORD wPole` ("high frequency emphasis value", `cbSize = 2`) — is
+  serialised/parsed by `dialogic::wav_format_extra` /
+  `wav_parse_format_extra` and accepted through
+  `CodecParameters::extradata`; no emphasis transfer function is
+  specified, so the field is carried, not applied (the code stream
+  decodes independently of it). The MSM6258's
   LSB-first nibble order is reachable via
   `dialogic::decode_packet(.., NibbleOrder::LoFirst, ..)`; the raw 12-bit
   value is available via `dialogic::Output::Native12`. The app note's
   §5 stream-reset sequence — 24 bytes / 48 samples of alternating ±zero
   codes that walk the step pointer to its floor without introducing a DC
   offset — is produced by `dialogic::reset_preamble`. The 3-bit OKI mode
-  is not implemented (the app note specifies only the 4-bit algorithm).
+  is not implemented: the archived catalogue documents its WAV framing
+  (`wBitsPerSample = 3`, `nBlockAlign` 3 mono / 6 stereo) but the app
+  note specifies only the 4-bit algorithm — the 3-bit quantiser /
+  reconstruction rule is a staged-docs gap.
+- **IANA WAVE registry (RFC 2361)** — the `wFormatTag` assignments
+  `0x0017` (`WAVE_FORMAT_DIALOGIC_OKI_ADPCM`, §A.16) and `0x0064`
+  (`WAVE_FORMAT_G726_ADPCM`, §A.54) are transcribed from the RFC 2361
+  registry staged at `docs/container/riff/rfc2361-wav.txt`. The raw
+  G.726-in-WAV tag `0x0045` is not in any staged catalogue; it is
+  claimed on black-box evidence alone (the opaque validator's own
+  G.726 WAV output carries it, and decodes `0x0064` byte-identically),
+  with the basis pinned in `tests/wav_tag_e2e.rs`.
 
 ## License
 
