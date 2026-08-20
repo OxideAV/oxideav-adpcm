@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Three more WAV-container tag claims** — the registry (and
+  `Variant::wave_format_tags` / `from_wave_format_tag`) now also route:
+  `0x0017` (`WAVE_FORMAT_DIALOGIC_OKI_ADPCM` per the IANA WAVE registry,
+  RFC 2361 §A.16 — the same 4-bit OKI chip-set body as `0x0010` /
+  `0x0203`) → `adpcm_dialogic`; `0x0045` (the raw bit-continuous
+  G.726-in-WAV tag common tools write — `nBlockAlign = 1`, MSB-first;
+  established black-box against the opaque validator, whose own G.726
+  WAV output carries this tag) and `0x0064` (`WAVE_FORMAT_G726_ADPCM`,
+  RFC 2361 §A.54; decoded byte-identically to `0x0045` by the
+  validator) → `adpcm_g726`. A WAV demuxer that resolves tags through
+  the codec registry now reaches these decoders directly.
+- **Container-derived G.726 framing default** — when the demuxer
+  records the on-wire tag in `CodecParameters::tag`, the G.726
+  factories default the `framing` option from it: the Antex sub-block
+  tags (`0x0040` / `0x0014`, staged `docs/audio/adpcm/g72x-wav/` layout)
+  default to `framing=wav`; the raw-stream tags (`0x0045` / `0x0064`)
+  and tagless parameters keep `framing=raw`. An explicit `framing`
+  option always wins (`decoder::g726_default_framing` exposes the rule
+  to tests).
+- **Block geometry from the documented `fmt ` trailers** — with no
+  explicit `block_align` option, the MS and IMA-WAV decoders now derive
+  `nBlockAlign` from the `wSamplesPerBlock` word that opens the
+  `ADPCMWAVEFORMAT` / `DVIADPCMWAVEFORMAT` extensions when the demuxer
+  passes the extension body through `CodecParameters::extradata`
+  (4-bit via `Variant::block_size_bytes`, 3-bit via the 12-byte-group
+  inverse), so multi-block packets split correctly with no out-of-band
+  option. `wSamplesPerBlock = 0` is treated as absent; a non-zero value
+  off the block-boundary lattice errors as a malformed header.
+
 - **IMA reference ladder compressor** — the compression procedure the
   IMA "Recommended Practices" Rev 3.00 publishes in Appendix D §6.1
   (and the DVI Wave Type specification's matching 4-bit / 3-bit encode

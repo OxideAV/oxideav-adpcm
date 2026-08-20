@@ -186,8 +186,8 @@ impl Variant {
     /// Empty for the two tagless variants (IMA-QT is FourCC-routed,
     /// ADPCM-A is chip-internal).
     ///
-    /// Most variants own exactly one tag. Two answer to a second,
-    /// documented alias tag for the *same* ITU / OKI algorithm:
+    /// Most variants own exactly one tag. Two answer to further
+    /// documented alias tags for the *same* ITU / OKI algorithm:
     ///
     /// - `Dialogic` also answers to `0x0203`
     ///   (`WAVE_FORMAT_DIALOGIC_OKI_ADPCM`) — the Dialogic WAV framing of
@@ -195,27 +195,43 @@ impl Variant {
     ///   extra-format-data) that `0x0010` (`WAVE_FORMAT_OKI_ADPCM`) also
     ///   carries. The staged catalogue records both as "created and read
     ///   by the OKI ADPCM chip set", so both decode byte-identically
-    ///   through this variant's registry decoder.
+    ///   through this variant's registry decoder. The IANA WAVE registry
+    ///   (RFC 2361 §A.16, staged at
+    ///   `docs/container/riff/rfc2361-wav.txt`) additionally assigns
+    ///   `WAVE_FORMAT_DIALOGIC_OKI_ADPCM` the value `0x0017` ("for OKI
+    ///   ADPCM chips or firmware") — the same chip-set algorithm, so
+    ///   `0x0017` routes here too (the opaque validator decodes a
+    ///   `0x0017`-tagged file byte-identically to `0x0010`).
     /// - `G726` also answers to `0x0014` (`WAVE_FORMAT_G723_ADPCM`) — the
     ///   older CCITT G.723 ADPCM, whose 3-bit (24 kbit/s) and 5-bit
     ///   (40 kbit/s) rates the 1990 G.726 Recommendation consolidates
     ///   alongside G.721 (`0x0040`, the 4-bit rate). The staged catalogue
     ///   notes the G.721 header format is "essentially the same as G.723";
     ///   the rate is selected from `wBitsPerSample` (the `bits_per_sample`
-    ///   codec option on the registry decoder).
+    ///   codec option on the registry decoder). Two further tags carry
+    ///   the *raw* bit-continuous G.726 code stream rather than the
+    ///   Antex sub-block layout:
+    ///   `0x0045` — the tag common tools write for G.726-in-WAV
+    ///   (`nBlockAlign = 1`, MSB-first continuous packing; established
+    ///   black-box against the opaque validator, whose own G.726 WAV
+    ///   output carries this tag — see `tests/g726_validate.rs`) — and
+    ///   `0x0064` (`WAVE_FORMAT_G726_ADPCM`, IANA WAVE registry RFC 2361
+    ///   §A.54, staged at `docs/container/riff/rfc2361-wav.txt`), which
+    ///   the opaque validator decodes byte-identically to `0x0045`.
     ///
     /// This is the single source of truth for both
     /// [`Variant::wave_format_tag`] (which returns the first element) and
     /// the reverse [`Variant::from_wave_format_tag`]. Tag values mirror
     /// the `WAVE_FORMAT_*` enumeration staged in
-    /// `docs/audio/adpcm/sdl_sound-wave-types.html`.
+    /// `docs/audio/adpcm/sdl_sound-wave-types.html` and the IANA WAVE
+    /// registry staged in `docs/container/riff/rfc2361-wav.txt`.
     pub const fn wave_format_tags(self) -> &'static [u16] {
         match self {
             Variant::Ms => &[0x0002],
             Variant::ImaWav => &[0x0011],
             Variant::Yamaha => &[0x0020],
-            Variant::Dialogic => &[0x0010, 0x0203],
-            Variant::G726 => &[0x0040, 0x0014],
+            Variant::Dialogic => &[0x0010, 0x0203, 0x0017],
+            Variant::G726 => &[0x0040, 0x0014, 0x0045, 0x0064],
             Variant::ImaQt | Variant::YamahaA => &[],
         }
     }
@@ -239,15 +255,21 @@ impl Variant {
     /// variants with a canonical WAV-format assignment resolve:
     ///
     /// - `0x0002` → `Variant::Ms` (`WAVE_FORMAT_ADPCM`).
-    /// - `0x0010` / `0x0203` → `Variant::Dialogic` (`WAVE_FORMAT_OKI_ADPCM`
-    ///   and its `WAVE_FORMAT_DIALOGIC_OKI_ADPCM` alias — the same 4-bit
+    /// - `0x0010` / `0x0203` / `0x0017` → `Variant::Dialogic`
+    ///   (`WAVE_FORMAT_OKI_ADPCM` and both documented
+    ///   `WAVE_FORMAT_DIALOGIC_OKI_ADPCM` assignments — the same 4-bit
     ///   OKI VOX body).
     /// - `0x0011` → `Variant::ImaWav` (`WAVE_FORMAT_DVI_ADPCM`).
     /// - `0x0020` → `Variant::Yamaha` (`WAVE_FORMAT_YAMAHA_ADPCM`).
     /// - `0x0040` / `0x0014` → `Variant::G726` (`WAVE_FORMAT_G721_ADPCM`
     ///   32 kbit/s 4-bit, and `WAVE_FORMAT_G723_ADPCM` 24/40 kbit/s
     ///   3-/5-bit; the 1990 G.726 Recommendation consolidates both older
-    ///   G.721 and G.723 ADPCM standards).
+    ///   G.721 and G.723 ADPCM standards). These carry the Antex
+    ///   sub-block WAV layout.
+    /// - `0x0045` / `0x0064` → `Variant::G726` — the raw bit-continuous
+    ///   G.726 code stream in WAV (`nBlockAlign = 1`, MSB-first;
+    ///   `0x0064` = `WAVE_FORMAT_G726_ADPCM` per RFC 2361 §A.54,
+    ///   `0x0045` = the tag common tools write, established black-box).
     ///
     /// Every other `wFormatTag` — including tags that belong to *other*
     /// codec families (`0x0001` PCM, `0x0028` G.722, …) and the two
@@ -261,10 +283,10 @@ impl Variant {
     pub const fn from_wave_format_tag(tag: u16) -> Option<Self> {
         match tag {
             0x0002 => Some(Variant::Ms),
-            0x0010 | 0x0203 => Some(Variant::Dialogic),
+            0x0010 | 0x0203 | 0x0017 => Some(Variant::Dialogic),
             0x0011 => Some(Variant::ImaWav),
             0x0020 => Some(Variant::Yamaha),
-            0x0040 | 0x0014 => Some(Variant::G726),
+            0x0040 | 0x0014 | 0x0045 | 0x0064 => Some(Variant::G726),
             _ => None,
         }
     }
@@ -791,14 +813,38 @@ pub(crate) enum G726Framing {
     Wav,
 }
 
+/// Container-derived default for the G.726 `framing` option, from the
+/// on-wire tag the demuxer recorded in [`CodecParameters::tag`]:
+///
+/// - `WaveFormat(0x0040)` / `WaveFormat(0x0014)` — the Antex
+///   G.721/G.723-in-WAV tags, whose `data` chunk is the sub-block
+///   bit-cell layout (staged `docs/audio/adpcm/g72x-wav/`) →
+///   [`G726Framing::Wav`].
+/// - `WaveFormat(0x0045)` / `WaveFormat(0x0064)` — the raw
+///   bit-continuous G.726-in-WAV tags (`nBlockAlign = 1`, MSB-first) →
+///   [`G726Framing::Raw`].
+/// - Any other tag, or no tag (raw telephony / RTP stream) →
+///   [`G726Framing::Raw`].
+///
+/// An explicit `framing` codec option always wins over this default.
+pub(crate) fn g726_default_framing(params: &CodecParameters) -> G726Framing {
+    match params.tag {
+        Some(oxideav_core::CodecTag::WaveFormat(0x0040 | 0x0014)) => G726Framing::Wav,
+        _ => G726Framing::Raw,
+    }
+}
+
 /// Parse the `framing` codec option. Accepted only for
-/// [`Variant::G726`]: `"raw"` (default) or `"wav"`.
+/// [`Variant::G726`]: `"raw"` or `"wav"`. When the option is absent the
+/// default is derived from the container tag via
+/// [`g726_default_framing`] (`wav` for the Antex tags `0x0040` /
+/// `0x0014`, `raw` otherwise).
 pub(crate) fn parse_g726_framing_option(
     variant: Variant,
     params: &CodecParameters,
 ) -> Result<G726Framing> {
     match params.options.get("framing") {
-        None => Ok(G726Framing::Raw),
+        None => Ok(g726_default_framing(params)),
         Some(v) => {
             if variant != Variant::G726 {
                 return Err(Error::unsupported(format!(
@@ -963,7 +1009,7 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // block-oriented MS / IMA-WAV decoders split a multi-block packet into
     // its constituent blocks; without it the packet is decoded as one
     // block (the prior behaviour). Stream-oriented variants ignore it.
-    let block_align: Option<usize> = match params.options.get("block_align") {
+    let mut block_align: Option<usize> = match params.options.get("block_align") {
         Some(v) => {
             let n: usize = v.parse().map_err(|_| {
                 Error::invalid(format!("adpcm: block_align option {v:?} is not a number"))
@@ -975,6 +1021,62 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         }
         None => None,
     };
+    // Without an explicit `block_align` option, the documented
+    // `WAVEFORMATEX` trailers carry the block geometry themselves: both
+    // `ADPCMWAVEFORMAT` (MS, staged catalogue "Microsoft ADPCM") and
+    // `DVIADPCMWAVEFORMAT` (IMA-WAV, staged catalogue "DVI ADPCM Wave
+    // Type") open with a `wSamplesPerBlock` word. A demuxer that hands
+    // the `fmt ` extension through `CodecParameters::extradata` (this
+    // crate's convention: the extension body without the leading
+    // `cbSize`) thereby communicates the framing, and the decoder
+    // re-derives `nBlockAlign` from it — so multi-block packets split
+    // correctly with no out-of-band option. `wSamplesPerBlock = 0` is
+    // treated as absent (some writers zero the field); a non-zero value
+    // that lands off the variant's block-boundary lattice is a
+    // malformed header and errors.
+    if block_align.is_none() && params.extradata.len() >= 2 {
+        let spb = u16::from_le_bytes([params.extradata[0], params.extradata[1]]) as usize;
+        if spb > 0 {
+            match variant {
+                Variant::Ms => {
+                    block_align =
+                        Some(Variant::Ms.block_size_bytes(channels, spb).ok_or_else(|| {
+                            Error::invalid(format!(
+                                "adpcm_ms: wSamplesPerBlock {spb} does not describe a whole \
+                                 {channels}-channel block"
+                            ))
+                        })?);
+                }
+                Variant::ImaWav if ima_bits == 3 => {
+                    // 3-bit framing: header seeds 1 sample, each
+                    // 12-byte-per-channel group adds 32.
+                    if spb < 1 || (spb - 1) % ima_wav::GROUP_SAMPLES_3BIT != 0 {
+                        return Err(Error::invalid(format!(
+                            "adpcm_ima_wav(3-bit): wSamplesPerBlock {spb} is not 1 + 32k"
+                        )));
+                    }
+                    let groups = (spb - 1) / ima_wav::GROUP_SAMPLES_3BIT;
+                    block_align =
+                        Some((4 + groups * ima_wav::GROUP_BYTES_3BIT) * channels as usize);
+                }
+                Variant::ImaWav => {
+                    block_align = Some(
+                        Variant::ImaWav
+                            .block_size_bytes(channels, spb)
+                            .ok_or_else(|| {
+                                Error::invalid(format!(
+                                    "adpcm_ima_wav: wSamplesPerBlock {spb} is not 1 + 8k"
+                                ))
+                            })?,
+                    );
+                }
+                // IMA-QT derives its own fixed 34-byte block; stream
+                // variants have no block framing (the G.726 WAV layout
+                // reads its extension separately below).
+                _ => {}
+            }
+        }
+    }
     // `chip` codec option — Yamaha ADPCM-B emulates one of two
     // documented chip families whose step-adaptation constants differ:
     // `aica` (default; AICA FQ8005 / Y8950 / YMZ280B, the WAV-tag-0x0020

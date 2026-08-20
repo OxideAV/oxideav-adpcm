@@ -181,7 +181,12 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     // also assigns WAVE_FORMAT_DIALOGIC_OKI_ADPCM = 0x0203 ("Dialogic OKI
     // ADPCM": mono, nBlockAlign = 1, no extra-format-data, 4 bits/sample,
     // "created and read by either OKI ADPCM chip set or by a firmware
-    // program") to the identical body, so both tags route here.
+    // program") to the identical body, so both tags route here. The IANA
+    // WAVE registry (RFC 2361 §A.16, docs/container/riff/rfc2361-wav.txt)
+    // records a second WAVE_FORMAT_DIALOGIC_OKI_ADPCM assignment at
+    // 0x0017 ("for OKI ADPCM chips or firmware") for the same chip-set
+    // algorithm; the opaque validator decodes a 0x0017-tagged file
+    // byte-identically to 0x0010, so all three tags route here.
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_DIALOGIC))
             .capabilities(
@@ -192,7 +197,8 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .decoder(decoder::make_decoder)
             .encoder(encoder::make_encoder)
             .tag(CodecTag::wave_format(0x0010))
-            .tag(CodecTag::wave_format(0x0203)),
+            .tag(CodecTag::wave_format(0x0203))
+            .tag(CodecTag::wave_format(0x0017)),
     );
     // adpcm_g726 — ITU-T G.726 (Rec. G.726, 12/1990). The documented
     // WAV assignments are WAVE_FORMAT_G721_ADPCM = 0x0040 (the 4-bit
@@ -203,7 +209,16 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
     // into G.726; the catalogue notes "the G.721 header format is
     // essentially the same as G.723"). Both tags route here; the rate
     // for either is taken from wBitsPerSample via the `bits_per_sample`
-    // codec option (the other rates are reached the same way).
+    // codec option (the other rates are reached the same way). Those two
+    // tags carry the Antex sub-block WAV layout, so the decoder factory
+    // defaults them to `framing=wav`. Two further tags carry the *raw*
+    // bit-continuous code stream instead (nBlockAlign = 1, MSB-first):
+    // 0x0045 — the tag common tools write for G.726-in-WAV, established
+    // black-box against the opaque validator (its own G.726 WAV output
+    // carries this tag; see tests/g726_validate.rs) — and 0x0064 =
+    // WAVE_FORMAT_G726_ADPCM per the IANA WAVE registry (RFC 2361 §A.54,
+    // docs/container/riff/rfc2361-wav.txt), which the validator decodes
+    // byte-identically to 0x0045. All four tags route here.
     reg.register(
         CodecInfo::new(CodecId::new(CODEC_ID_G726))
             .capabilities(
@@ -214,7 +229,9 @@ pub fn register_codecs(reg: &mut CodecRegistry) {
             .decoder(decoder::make_decoder)
             .encoder(encoder::make_encoder)
             .tag(CodecTag::wave_format(0x0040))
-            .tag(CodecTag::wave_format(0x0014)),
+            .tag(CodecTag::wave_format(0x0014))
+            .tag(CodecTag::wave_format(0x0045))
+            .tag(CodecTag::wave_format(0x0064)),
     );
 }
 
@@ -425,6 +442,97 @@ mod tests {
     }
 
     #[test]
+    fn dialogic_rfc2361_alias_tag_routes_to_dialogic() {
+        // The IANA WAVE registry (RFC 2361 §A.16) assigns
+        // WAVE_FORMAT_DIALOGIC_OKI_ADPCM the value 0x0017 ("for OKI ADPCM
+        // chips or firmware") — the same 4-bit OKI chip-set body as
+        // 0x0010 / 0x0203, so it routes to the Dialogic variant.
+        assert_eq!(
+            Variant::from_wave_format_tag(0x0017),
+            Some(Variant::Dialogic)
+        );
+        assert!(Variant::Dialogic.wave_format_tags().contains(&0x0017));
+        // Canonical tag is unchanged (still 0x0010).
+        assert_eq!(Variant::Dialogic.wave_format_tag(), Some(0x0010));
+
+        use oxideav_core::{CodecTag, ProbeContext};
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        let wf = CodecTag::wave_format(0x0017);
+        let id = reg
+            .resolve_tag_ref(&ProbeContext::new(&wf))
+            .expect("0x0017 must resolve to a registered codec");
+        assert_eq!(Variant::from_codec_id(id), Some(Variant::Dialogic));
+    }
+
+    #[test]
+    fn g726_raw_wav_tags_route_to_g726() {
+        // 0x0045 (the raw bit-continuous G.726-in-WAV tag common tools
+        // write — established black-box, see tests/g726_validate.rs) and
+        // 0x0064 (WAVE_FORMAT_G726_ADPCM, RFC 2361 §A.54) both route to
+        // the G726 variant; the canonical tag stays 0x0040.
+        for tag in [0x0045u16, 0x0064] {
+            assert_eq!(Variant::from_wave_format_tag(tag), Some(Variant::G726));
+            assert!(Variant::G726.wave_format_tags().contains(&tag));
+        }
+        assert_eq!(Variant::G726.wave_format_tag(), Some(0x0040));
+
+        use oxideav_core::{CodecTag, ProbeContext};
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        for tag in [0x0045u16, 0x0064] {
+            let wf = CodecTag::wave_format(tag);
+            let id = reg
+                .resolve_tag_ref(&ProbeContext::new(&wf))
+                .unwrap_or_else(|| panic!("{tag:#06x} must resolve to a registered codec"));
+            assert_eq!(Variant::from_codec_id(id), Some(Variant::G726));
+        }
+    }
+
+    #[test]
+    fn g726_framing_default_follows_container_tag() {
+        // The factory derives the `framing` default from the on-wire
+        // tag: the Antex sub-block tags (0x0040 / 0x0014) default to
+        // framing=wav, the raw-stream tags (0x0045 / 0x0064) and tagless
+        // parameters default to framing=raw. An explicit option always
+        // wins. Observable via the stereo acceptance rule: only
+        // framing=wav accepts 2 channels.
+        let mut reg = CodecRegistry::new();
+        register_codecs(&mut reg);
+        let build = |tag: Option<u16>, opts: &[(&str, &str)], channels: u16| {
+            let mut p = CodecParameters::audio(CodecId::new(CODEC_ID_G726));
+            p.sample_rate = Some(8_000);
+            p.channels = Some(channels);
+            p.tag = tag.map(oxideav_core::CodecTag::wave_format);
+            for (k, v) in opts {
+                p.options.insert(*k, *v);
+            }
+            reg.first_decoder(&p)
+        };
+        // Antex tags: wav default ⇒ stereo accepted.
+        for tag in [0x0040u16, 0x0014] {
+            build(Some(tag), &[], 2)
+                .unwrap_or_else(|e| panic!("{tag:#06x}: wav default must accept stereo: {e:?}"));
+            // Explicit raw wins over the tag default ⇒ stereo rejected.
+            assert!(
+                build(Some(tag), &[("framing", "raw")], 2).is_err(),
+                "{tag:#06x}: explicit framing=raw must reject stereo"
+            );
+        }
+        // Raw-stream tags + tagless: raw default ⇒ stereo rejected,
+        // explicit wav accepted.
+        for tag in [Some(0x0045u16), Some(0x0064), None] {
+            assert!(
+                build(tag, &[], 2).is_err(),
+                "{tag:?}: raw default must reject stereo"
+            );
+            build(tag, &[("framing", "wav")], 2).unwrap_or_else(|e| {
+                panic!("{tag:?}: explicit framing=wav must accept stereo: {e:?}")
+            });
+        }
+    }
+
+    #[test]
     fn g723_alias_tag_routes_to_g726() {
         // WAVE_FORMAT_G723_ADPCM (0x0014) is the older CCITT G.723 ADPCM
         // (3-/5-bit rates), consolidated into G.726 alongside G.721
@@ -495,11 +603,14 @@ mod tests {
             0x0006,    // A-law
             0x0007,    // mu-law
             0x0028,    // G.722 (its own crate)
-            0x0045,    // not in the staged WAVE_FORMAT_* catalogue — the
-            // only documented G.726-family tag is 0x0040
-            // (WAVE_FORMAT_G721_ADPCM), which Variant::G726
-            // owns; 0x0045 stays unclaimed
-            0xFFFF, // WAVE_FORMAT_EXTENSIBLE / sentinel
+            0x0042,    // MSG723 (a speech codec, not waveform ADPCM)
+            0x0055,    // MP3 (its own crate)
+            0x0065,    // WAVE_FORMAT_G722_ADPCM (RFC 2361 §A.55 — G.722's
+            // crate's domain, not this one)
+            0xFFFE, // WAVE_FORMAT_EXTENSIBLE — the escape hatch itself
+            // never routes; the demuxer folds the SubFormat
+            // template GUID back to the embedded legacy tag
+            0xFFFF, // sentinel
         ] {
             assert_eq!(
                 Variant::from_wave_format_tag(tag),
