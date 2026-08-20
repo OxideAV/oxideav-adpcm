@@ -362,6 +362,40 @@ pub fn reset_preamble(order: NibbleOrder) -> [u8; RESET_PREAMBLE_BYTES] {
     [byte; RESET_PREAMBLE_BYTES]
 }
 
+// ---------------------------------------------------------------------------
+// OKI-in-WAV `fmt ` extension (`OKIADPCMWAVEFORMAT`).
+// ---------------------------------------------------------------------------
+
+/// Serialise the `OKIADPCMWAVEFORMAT` `fmt `-chunk extension body — the
+/// single `WORD wPole` field (`cbSize = 2`) the staged catalogue's "OKI
+/// ADPCM Wave Types" entry defines for `WAVE_FORMAT_OKI_ADPCM`
+/// (`0x0010`). Excludes the leading `cbSize` word per this crate's
+/// `extradata` convention (a WAV muxer prepends `cbSize = 2`).
+///
+/// `wPole` is documented only as the "high frequency emphasis value";
+/// the catalogue specifies no emphasis transfer function, so the codec
+/// carries the field for round-tripping but the 4-bit code stream
+/// itself decodes independently of it (a `wPole` of 0 — no emphasis —
+/// is the value the crate's own muxer-facing helpers emit).
+pub fn wav_format_extra(w_pole: u16) -> [u8; 2] {
+    w_pole.to_le_bytes()
+}
+
+/// Parse the `OKIADPCMWAVEFORMAT` extension body (the inverse of
+/// [`wav_format_extra`]): returns `wPole` when at least the two-byte
+/// field is present, `None` for an absent (empty) extension.
+///
+/// Longer bodies are accepted and the trailing bytes ignored — the
+/// catalogue fixes `cbSize = 2`, but tolerating a producer that pads
+/// the extension loses nothing (there are no further defined fields).
+pub fn wav_parse_format_extra(extradata: &[u8]) -> Option<u16> {
+    if extradata.len() >= 2 {
+        Some(u16::from_le_bytes([extradata[0], extradata[1]]))
+    } else {
+        None
+    }
+}
+
 /// Reject obviously-invalid channel counts; used by the registry
 /// factories. Dialogic VOX is mono in practice; we permit up to 2
 /// channels for synthetic stereo material via nibble interleave.

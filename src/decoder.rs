@@ -599,11 +599,36 @@ impl Variant {
     /// - [`Variant::ImaQt`] — QuickTime `ima4` is carried in an ISO-BMFF
     ///   sample entry, not a WAV `fmt ` chunk, so it has no `WAVEFORMATEX`
     ///   extension here;
-    /// - the three [`Shape::StreamOriented`] variants (no block framing);
+    /// - the tagless / trailer-less stream variants (Yamaha-A has no WAV
+    ///   assignment at all; Yamaha-B's `0x0020` entry defines no
+    ///   extension fields here);
     /// - any `(channels, block_align)` pair whose
     ///   [`Self::samples_per_block`] is `None` (invalid block geometry —
     ///   bad channel count, too-small block, or off-boundary body length).
+    ///
+    /// Two stream-shaped variants *do* carry a documented `fmt `
+    /// extension and are handled specially:
+    /// [`Variant::G726`] (the Antex `nAuxBlockSize` word, aux-free form
+    /// only — see below) and [`Variant::Dialogic`] (the
+    /// `OKIADPCMWAVEFORMAT` `wPole` word, `cbSize = 2`, emitted as 0 =
+    /// no emphasis; the catalogue's 4-bit rows fix `nBlockAlign = 1`
+    /// for both mono and stereo, so any other `block_align` returns
+    /// `None`).
     pub fn build_wave_format_extra(self, channels: u16, block_align: usize) -> Option<Vec<u8>> {
+        // OKI-in-WAV (tags 0x0010 / 0x0203 / 0x0017): the catalogue's
+        // OKIADPCMWAVEFORMAT carries a single wPole word ("high
+        // frequency emphasis value"; cbSize = 2). Only the 4-bit mode
+        // is implemented, whose tabulated nBlockAlign is 1 for mono
+        // AND stereo; wPole = 0 (no emphasis) is the only value with a
+        // defined-by-omission meaning, so that is what a muxer gets
+        // (serialise other values directly with
+        // [`dialogic::wav_format_extra`]).
+        if self == Variant::Dialogic {
+            if channels == 0 || channels > 2 || block_align != 1 {
+                return None;
+            }
+            return Some(dialogic::wav_format_extra(0).to_vec());
+        }
         // G.726 in a WAV container (tags 0x0040 / 0x0014) is the one
         // stream-shaped variant with a `fmt ` extension: the single
         // `nAuxBlockSize` field. Only the aux-free form is derivable
@@ -1004,6 +1029,20 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     } else {
         None
     };
+    // OKI-in-WAV `fmt ` extension (`OKIADPCMWAVEFORMAT`): a single
+    // `wPole` word ("high frequency emphasis value", cbSize = 2). The
+    // catalogue defines no emphasis transfer function, so the value is
+    // accepted and carried but the 4-bit code stream decodes
+    // independently of it; a one-byte extension is a malformed header.
+    if variant == Variant::Dialogic && !params.extradata.is_empty() {
+        if params.extradata.len() < 2 {
+            return Err(Error::invalid(
+                "adpcm_dialogic: OKIADPCMWAVEFORMAT extension must be at least the \
+                 two-byte wPole field",
+            ));
+        }
+        let _w_pole = dialogic::wav_parse_format_extra(&params.extradata);
+    }
     // `block_align` codec option — the WAV `nBlockAlign` (bytes per block,
     // summed over all channels). When the demuxer passes it, the
     // block-oriented MS / IMA-WAV decoders split a multi-block packet into

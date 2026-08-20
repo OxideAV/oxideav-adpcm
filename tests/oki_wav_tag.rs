@@ -113,3 +113,96 @@ fn oki_wav_empty_body_is_accepted() {
     dec.send_packet(&pkt).expect("empty packet accepted");
     let _ = dec.receive_frame();
 }
+
+// ---------------------------------------------------------------------------
+// OKIADPCMWAVEFORMAT (`wPole`) fmt-extension coverage — the staged
+// catalogue's "OKI ADPCM Wave Types" entry defines a single WORD wPole
+// ("high frequency emphasis value", cbSize = 2) after the WAVEFORMATEX
+// base. The codec carries the field; the 4-bit code stream decodes
+// independently of it (no emphasis transfer function is specified).
+// ---------------------------------------------------------------------------
+
+use oxideav_adpcm::Variant;
+
+#[test]
+fn oki_wav_format_extra_round_trips() {
+    for w_pole in [0u16, 1, 0x1234, u16::MAX] {
+        let ext = dialogic::wav_format_extra(w_pole);
+        assert_eq!(ext.len(), 2, "cbSize-equivalent length must be 2");
+        assert_eq!(dialogic::wav_parse_format_extra(&ext), Some(w_pole));
+    }
+    // Absent extension parses as None; padded extensions tolerate the
+    // trailing bytes (no further fields are defined).
+    assert_eq!(dialogic::wav_parse_format_extra(&[]), None);
+    assert_eq!(dialogic::wav_parse_format_extra(&[1]), None);
+    assert_eq!(
+        dialogic::wav_parse_format_extra(&[0x34, 0x12, 0xFF]),
+        Some(0x1234)
+    );
+}
+
+#[test]
+fn oki_build_wave_format_extra_emits_wpole_zero_for_catalogue_geometry() {
+    // The catalogue's 4-bit rows fix nBlockAlign = 1 for mono AND
+    // stereo; the emitted trailer is the wPole = 0 (no emphasis) form.
+    assert_eq!(
+        Variant::Dialogic.build_wave_format_extra(1, 1),
+        Some(vec![0, 0])
+    );
+    assert_eq!(
+        Variant::Dialogic.build_wave_format_extra(2, 1),
+        Some(vec![0, 0])
+    );
+    // Off-catalogue geometry: any other block_align, or a channel count
+    // outside 1..=2, has no documented 4-bit form.
+    assert_eq!(Variant::Dialogic.build_wave_format_extra(1, 2), None);
+    assert_eq!(Variant::Dialogic.build_wave_format_extra(1, 3), None);
+    assert_eq!(Variant::Dialogic.build_wave_format_extra(0, 1), None);
+    assert_eq!(Variant::Dialogic.build_wave_format_extra(3, 1), None);
+}
+
+#[test]
+fn oki_registry_decode_is_independent_of_wpole_extradata() {
+    // The same body decodes byte-identically with no extension, with
+    // wPole = 0, and with a non-zero wPole — the catalogue defines no
+    // emphasis transfer function, so the code stream is authoritative.
+    let pcm = synth_pcm(512);
+    let body = encode_oki_body(&pcm);
+
+    let mut reg = CodecRegistry::new();
+    register_codecs(&mut reg);
+    let decode_with = |extradata: Vec<u8>| -> Vec<i16> {
+        let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_DIALOGIC));
+        params.sample_rate = Some(8_000);
+        params.channels = Some(1);
+        params.extradata = extradata;
+        let mut dec = reg.first_decoder(&params).expect("dialogic decoder");
+        let pkt = Packet::new(0, TimeBase::new(1, 8_000), body.clone());
+        dec.send_packet(&pkt).unwrap();
+        let Frame::Audio(af) = dec.receive_frame().unwrap() else {
+            panic!("expected audio frame");
+        };
+        af.data[0]
+            .chunks_exact(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    };
+    let bare = decode_with(Vec::new());
+    let zero = decode_with(dialogic::wav_format_extra(0).to_vec());
+    let emph = decode_with(dialogic::wav_format_extra(0x0100).to_vec());
+    assert_eq!(bare, zero);
+    assert_eq!(bare, emph);
+}
+
+#[test]
+fn oki_registry_rejects_one_byte_extension() {
+    // A one-byte extension cannot hold the WORD wPole field — malformed
+    // OKIADPCMWAVEFORMAT header.
+    let mut reg = CodecRegistry::new();
+    register_codecs(&mut reg);
+    let mut params = CodecParameters::audio(CodecId::new(CODEC_ID_DIALOGIC));
+    params.sample_rate = Some(8_000);
+    params.channels = Some(1);
+    params.extradata = vec![0x00];
+    assert!(reg.first_decoder(&params).is_err());
+}

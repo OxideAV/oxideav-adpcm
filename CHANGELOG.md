@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and tagless parameters keep `framing=raw`. An explicit `framing`
   option always wins (`decoder::g726_default_framing` exposes the rule
   to tests).
+- **`OKIADPCMWAVEFORMAT` (`wPole`) extension support** — the staged
+  catalogue's OKI-in-WAV entry defines a single `WORD wPole` ("high
+  frequency emphasis value", `cbSize = 2`) after the `WAVEFORMATEX`
+  base. `dialogic::wav_format_extra` / `wav_parse_format_extra`
+  serialise and parse it; the registry decoder accepts the extension
+  through `CodecParameters::extradata` (a one-byte body is rejected as
+  malformed) and decodes the 4-bit code stream independently of the
+  value — the catalogue specifies no emphasis transfer function, so the
+  field is carried, not applied. `Variant::Dialogic.build_wave_format_extra`
+  now emits the `wPole = 0` (no-emphasis) trailer for the catalogue's
+  4-bit geometry (`nBlockAlign = 1`, mono or stereo) instead of `None`.
 - **Block geometry from the documented `fmt ` trailers** — with no
   explicit `block_align` option, the MS and IMA-WAV decoders now derive
   `nBlockAlign` from the `wSamplesPerBlock` word that opens the
