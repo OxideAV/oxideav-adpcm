@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.7](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.6...v0.0.7) - 2026-08-20
+
+### Other
+
+- hostile-extradata factory coverage for the derived-framing path
+- README — WAV tag-claiming chain, new tag claims, wPole extension, 3-bit OKI gap
+- encoders advertise wire tag + fmt-extension extradata on output_params
+- OKIADPCMWAVEFORMAT wPole fmt-extension support
+- WAV-tag end-to-end proof suite (registry resolve + demuxer-shaped decode)
+- claim WAV tags 0x0017 / 0x0045 / 0x0064 + container-derived framing defaults
+- document the IMA reference compressor arc (README + CHANGELOG)
+- reference-quantizer wire conformance through the opaque validator
+- hostile-input coverage for the IMA reference encode path
+- IMA reference-compressor conformance suite (double-entry oracles)
+- reference-quantizer encode path for IMA-WAV (4/3-bit) and IMA-QT
+- IMA reference ladder quantizers (Appendix D §6.1 + DVI 3-bit)
+- VBR rate-walk tandem leg in the G.726 decode fuzz target
+- per-sample random rate-walk VBR test (Appendix I.1 strongest form)
+- G.726 VBR conformance — staged demo reference bit-exact, frame period settled at 16 samples
+- G.723/G.721-in-WAV sub-block codec, framing=wav registry surface, VBR pin, bench row
+- bench the G.726 WAV-framing stereo decode path
+- hostile-input hardening for the G.726 WAV framing walkers
+- G.726 VBR rate-switching pinned under the documented demo schedule
+- G.723/G.721-in-WAV fmt-extension serialisation + extradata aux plumbing
+- G.726 registry framing=wav encoder — sub-block emit, stereo lanes, silence-padded flush
+- G.726 registry framing=wav — sub-block decode, stereo lanes, aux prefix
+- G.723/G.721-in-WAV sub-block bit-cell codec
+- G.723/G.721-in-WAV block-alignment geometry helpers
+- WAVE_FORMAT_G723_ADPCM (0x0014) alias tag routes to G.726
+- WAVE_FORMAT_DIALOGIC_OKI_ADPCM (0x0203) alias tag for Dialogic VOX
+- add CI / crates.io / docs.rs / MIT-license badges
+- rustfmt the g726 fuzz target (fuzz crate is outside the workspace fmt gate)
+- G.726 law-path bench + fuzz coverage
+- G.726 registry 'law' option — log-PCM interface on the codec path
+- document the G.726 log-PCM interface + Appendix II conformance gate
+- G.726 law-path property tests — EXPAND equivalence + SYNC tandem transparency
+- ITU-T G.726 conformance vectors as a byte-exact CI gate
+- G.726 G.711 log-PCM interface — §4.2.1 EXPAND, §4.2.8 COMPRESS + SYNC
+- G.726 mid-stream rate switching (State::set_rate) + optional reset (R = 1)
+- document the G.726 family addition (README + CHANGELOG)
+- G.726 decode benchmarks (all four rates)
+- G.726 fuzz coverage — cargo-fuzz targets + in-tree structured sweeps
+- G.726 opaque-validator conformance, both directions, all four rates
+- register adpcm_g726 — Variant::G726, rate + bit_order options, WAV tag 0x0040
+- ITU-T G.726 bit-exact core — §4.2 sub-blocks, four-rate state machine, bit packing
+- property-style round-trip fuzz coverage for WAVEFORMATEX trailer builders
+- document reverse tag/fourcc routing + WAVEFORMATEX trailer builders in README
+- WAVEFORMATEX trailer builders for block-oriented WAV encoders
+- Variant reverse tag/fourcc routing (from_wave_format_tag / from_fourcc)
+- Dialogic stereo decode benchmark
+- Dialogic stereo decode coverage + bit-exact roundtrip
+- encoder-fuzz coverage for Dialogic multi-channel encode
+- OKI/Dialogic VOX stereo encode (encode_packet_multi)
+- drop barred multimedia.cx URLs from src/tables.rs provenance comments
+- broadband + non-default-geometry encoder validation
+- encoder-output wire-conformance validation (encode_validate.rs)
+- Yamaha ADPCM-A decode-level fidelity fix (>>4 per doc §3)
+- registry chip (Yamaha ADPCM-B) + nibble_order (Dialogic) codec options
+- fix IMA-WAV 4-bit multichannel encode default block size
+- IMA-QT multichannel block interleave (1..=8 channels)
+- end-to-end validator coverage for IMA-QT (ima4)
+- neutralise black-box-validator naming in wav_decode comment
+- multi-block packet decode for MS / IMA-WAV (block_align option)
+- Dialogic/OKI VOX §5 stream-reset preamble (dialogic::reset_preamble)
+
 ### Added
 
 - **Three more WAV-container tag claims** — the registry (and
