@@ -484,7 +484,7 @@ impl MsEncoder {
                 }
             }
             debug_assert_eq!(self.pcm.len(), per_block_samples_interleaved);
-            let take: Vec<i16> = self.pcm.drain(..).collect();
+            let take: Vec<i16> = std::mem::take(&mut self.pcm);
             let bytes = encode_block(&take, self.channels, self.block_size)?;
             let pts = self.samples_emitted;
             self.samples_emitted += n_per_block as i64;
@@ -1190,7 +1190,7 @@ impl ImaWavEncoder {
                 }
             }
             debug_assert_eq!(self.pcm.len(), per_block_samples_interleaved);
-            let take: Vec<i16> = self.pcm.drain(..).collect();
+            let take: Vec<i16> = std::mem::take(&mut self.pcm);
             let bytes = self.encode_one_block(&take)?;
             let pts = self.samples_emitted;
             self.samples_emitted += n_per_block as i64;
@@ -1470,7 +1470,7 @@ impl ImaQtEncoder {
                 }
             }
             debug_assert_eq!(self.pcm.len(), per_block_samples_interleaved);
-            let take: Vec<i16> = self.pcm.drain(..).collect();
+            let take: Vec<i16> = std::mem::take(&mut self.pcm);
             let bytes = self.encode_one_block(&take)?;
             let pts = self.samples_emitted;
             self.samples_emitted += n_per_block as i64;
@@ -1839,7 +1839,7 @@ impl Encoder for G726Encoder {
             // byte-aligned by construction.
             let lanes = self.states.len();
             let group = 8 * lanes;
-            let mut last: Vec<i16> = self.buf.drain(..).collect();
+            let mut last: Vec<i16> = std::mem::take(&mut self.buf);
             last.resize(group, 0);
             tail = self.encode_interleaved(&last);
         }
