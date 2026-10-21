@@ -1193,6 +1193,7 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
         yamaha_state: vec![yamaha::Channel::for_chip(yamaha_chip); channels as usize],
         yamaha_a_state: vec![yamaha_a::Channel::default(); channels as usize],
         dialogic_state: vec![dialogic::Channel::default(); channels as usize],
+        ima_qt_state: vec![ima_qt::QtChannel::default(); channels as usize],
         g726_rate,
         g726_states: vec![g726::State::new(g726_rate); g726_lanes],
         g726_unpacker: g726::BitUnpacker::new(g726_order),
@@ -1250,6 +1251,9 @@ pub struct AdpcmDecoder {
     // Dialogic / OKI VOX is also stream-oriented (state persists across
     // packets — no per-block resets).
     dialogic_state: Vec<dialogic::Channel>,
+    // QuickTime IMA keeps each channel's predictor from block to block
+    // while the next block's preamble agrees with it.
+    ima_qt_state: Vec<ima_qt::QtChannel>,
     // G.726 is stream-oriented at the *bit* level: codec state carries
     // across packets and, at the 3- and 5-bit rates, so does a partial
     // code word (the unpacker's residual bits). The rate and in-byte
@@ -1374,7 +1378,8 @@ impl AdpcmDecoder {
                     (pkt.data.len() / blk) * ima_qt::QT_SAMPLES_PER_BLOCK * channels,
                 );
                 for chunk in pkt.data.chunks_exact(blk) {
-                    let block_pcm = ima_qt::decode_block(chunk, channels)?;
+                    let block_pcm =
+                        ima_qt::decode_block_continuous(chunk, channels, &mut self.ima_qt_state)?;
                     out.extend_from_slice(&block_pcm);
                 }
                 out
@@ -1498,8 +1503,8 @@ impl Decoder for AdpcmDecoder {
     fn reset(&mut self) -> Result<()> {
         self.pending = None;
         self.eof = false;
-        // Re-seed per-channel Yamaha (A + B) + Dialogic state. MS /
-        // IMA are memoryless per block so no further action needed.
+        // Re-seed per-channel Yamaha (A + B), Dialogic and QuickTime IMA state. MS /
+        // IMA-WAV are memoryless per block so no further action needed.
         for st in &mut self.yamaha_state {
             *st = yamaha::Channel::for_chip(self.yamaha_chip);
         }
@@ -1508,6 +1513,9 @@ impl Decoder for AdpcmDecoder {
         }
         for st in &mut self.dialogic_state {
             *st = dialogic::Channel::default();
+        }
+        for st in &mut self.ima_qt_state {
+            *st = ima_qt::QtChannel::default();
         }
         for st in &mut self.g726_states {
             *st = g726::State::new(self.g726_rate);
