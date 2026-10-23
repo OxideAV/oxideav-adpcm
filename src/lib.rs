@@ -908,7 +908,7 @@ mod tests {
         for ch in &[1u16, 2u16] {
             let ch_u = *ch as usize;
             for n in [2usize, 4, 6, 10, 32] {
-                if (n - 2) * ch_u % 2 != 0 {
+                if !((n - 2) * ch_u).is_multiple_of(2) {
                     continue;
                 }
                 let b = Variant::Ms.block_size_bytes(*ch, n).unwrap();

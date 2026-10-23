@@ -453,7 +453,7 @@ impl Variant {
                 // Body must be a whole number of per-channel bytes;
                 // otherwise the per-channel nibble-pair count isn't an
                 // integer.
-                if body_len % ch != 0 {
+                if !body_len.is_multiple_of(ch) {
                     return None;
                 }
                 Some(2 + (body_len * 2) / ch)
@@ -465,7 +465,7 @@ impl Variant {
                 }
                 let body_len = block_bytes - header_len;
                 let group_bytes = 4 * ch;
-                if body_len % group_bytes != 0 {
+                if !body_len.is_multiple_of(group_bytes) {
                     return None;
                 }
                 Some(1 + (body_len / group_bytes) * 8)
@@ -542,7 +542,7 @@ impl Variant {
                 // Body decodes 2 samples per byte per channel; the total
                 // body byte run must be a whole number of bytes.
                 let body_nibbles = body_samples * ch;
-                if body_nibbles % 2 != 0 {
+                if !body_nibbles.is_multiple_of(2) {
                     return None;
                 }
                 Some(7 * ch + body_nibbles / 2)
@@ -554,7 +554,7 @@ impl Variant {
                 }
                 let body_samples = samples_per_channel - 1;
                 // 8 samples per channel per 4*ch-byte group.
-                if body_samples % 8 != 0 {
+                if !body_samples.is_multiple_of(8) {
                     return None;
                 }
                 let groups = body_samples / 8;
@@ -1089,7 +1089,7 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
                 Variant::ImaWav if ima_bits == 3 => {
                     // 3-bit framing: header seeds 1 sample, each
                     // 12-byte-per-channel group adds 32.
-                    if spb < 1 || (spb - 1) % ima_wav::GROUP_SAMPLES_3BIT != 0 {
+                    if spb < 1 || !(spb - 1).is_multiple_of(ima_wav::GROUP_SAMPLES_3BIT) {
                         return Err(Error::invalid(format!(
                             "adpcm_ima_wav(3-bit): wSamplesPerBlock {spb} is not 1 + 32k"
                         )));
@@ -1155,10 +1155,11 @@ pub(crate) fn make_decoder(params: &CodecParameters) -> Result<Box<dyn Decoder>>
     // the `fmt ` extension through `extradata` instead — the
     // catalogue's one-field `nAuxBlockSize` form. An explicit option
     // wins over extradata.
-    if g726_framing == G726Framing::Wav && params.options.get("aux_block_size").is_none() {
-        if let Some(aux) = g726::wav_parse_format_extra(&params.extradata) {
-            g726_aux = aux as usize;
-        }
+    if g726_framing == G726Framing::Wav
+        && params.options.get("aux_block_size").is_none()
+        && let Some(aux) = g726::wav_parse_format_extra(&params.extradata)
+    {
+        g726_aux = aux as usize;
     }
     if g726_framing == G726Framing::Wav {
         if !g726::wav_rate_supported(g726_rate) {
@@ -1363,7 +1364,7 @@ impl AdpcmDecoder {
             Variant::ImaQt => {
                 // Packet may contain N·(channels·34) bytes — iterate.
                 let blk = ima_qt::QT_BLOCK_SIZE * channels;
-                if pkt.data.len() % blk != 0 {
+                if !pkt.data.len().is_multiple_of(blk) {
                     return Err(Error::invalid(format!(
                         "adpcm_ima_qt: packet {} bytes is not a multiple of {blk} ({channels}ch × 34B)",
                         pkt.data.len()

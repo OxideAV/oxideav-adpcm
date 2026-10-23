@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oxideav_adpcm::{
-    ima_wav, ms, yamaha, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA,
+    CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA, ima_wav, ms, yamaha,
 };
 use oxideav_core::CodecRegistry;
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, TimeBase};
@@ -168,11 +168,7 @@ fn xcorr(a: &[i16], b: &[i16]) -> f64 {
         db += bi * bi;
     }
     let denom = (da * db).sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        num / denom
-    }
+    if denom == 0.0 { 0.0 } else { num / denom }
 }
 
 fn decode_wav_with_our_decoder(codec_id: &str, wav: &[u8]) -> Vec<i16> {
@@ -204,7 +200,7 @@ fn decode_wav_with_our_decoder(codec_id: &str, wav: &[u8]) -> Vec<i16> {
                 panic!("expected audio frame");
             };
             let bytes = &af.data[0];
-            for c in bytes.chunks_exact(2) {
+            for c in bytes.as_chunks::<2>().0 {
                 pcm.push(i16::from_le_bytes([c[0], c[1]]));
             }
         }
@@ -216,7 +212,7 @@ fn decode_wav_with_our_decoder(codec_id: &str, wav: &[u8]) -> Vec<i16> {
             panic!("expected audio frame");
         };
         let bytes = &af.data[0];
-        for c in bytes.chunks_exact(2) {
+        for c in bytes.as_chunks::<2>().0 {
             pcm.push(i16::from_le_bytes([c[0], c[1]]));
         }
     }
@@ -225,7 +221,9 @@ fn decode_wav_with_our_decoder(codec_id: &str, wav: &[u8]) -> Vec<i16> {
 
 fn load_pcm(path: &Path) -> Vec<i16> {
     let raw = fs::read(path).unwrap();
-    raw.chunks_exact(2)
+    raw.as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -349,7 +347,9 @@ fn decode_one_packet(codec_id: &str, block_align: usize, data: Vec<u8>) -> Vec<i
         panic!("expected audio frame");
     };
     af.data[0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -357,8 +357,8 @@ fn decode_one_packet(codec_id: &str, block_align: usize, data: Vec<u8>) -> Vec<i
 #[test]
 fn ms_multi_block_packet_decodes_every_block() {
     let block_size = 256usize; // bytes per block, mono
-                               // samples/channel for an MS block of `block_size` bytes:
-                               //   (block_size - 7) * 2 + 2
+    // samples/channel for an MS block of `block_size` bytes:
+    //   (block_size - 7) * 2 + 2
     let spb = (block_size - 7) * 2 + 2;
     let n_blocks = 4;
     let pcm = ramp_pcm(spb * n_blocks);
@@ -390,8 +390,8 @@ fn ms_multi_block_packet_decodes_every_block() {
 #[test]
 fn ima_wav_multi_block_packet_decodes_every_block() {
     let block_size = 256usize; // bytes per block, mono
-                               // IMA-WAV mono: 4-byte header + (block_size-4) body bytes × 2 nibbles
-                               // = 1 (seed) + (block_size-4)*2 samples per block.
+    // IMA-WAV mono: 4-byte header + (block_size-4) body bytes × 2 nibbles
+    // = 1 (seed) + (block_size-4)*2 samples per block.
     let spb = 1 + (block_size - 4) * 2;
     let n_blocks = 4;
     let pcm = ramp_pcm(spb * n_blocks);
@@ -441,7 +441,9 @@ fn block_align_absent_decodes_single_block_unchanged() {
         panic!("audio frame");
     };
     let got: Vec<i16> = af.data[0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
     assert_eq!(got, reference);
@@ -564,7 +566,7 @@ fn ima_qt_adpcm_vs_ffmpeg_reference() {
     let raw = extract_caf_data_chunk(&caf);
     // The mono `ima4` payload is a flat run of 34-byte blocks.
     assert!(
-        raw.len() % 34 == 0,
+        raw.len().is_multiple_of(34),
         "ima4 payload {} not a multiple of 34",
         raw.len()
     );
@@ -584,7 +586,9 @@ fn ima_qt_adpcm_vs_ffmpeg_reference() {
         panic!("expected audio frame");
     };
     let ours: Vec<i16> = af.data[0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
 

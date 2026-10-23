@@ -33,11 +33,7 @@ fn seed_pair(seed_bytes: &[u8]) -> (i32, i32) {
         for (i, &b) in seed_bytes.iter().take(4).enumerate() {
             acc |= (b as u32) << (i * 8);
         }
-        if acc == 0 {
-            0x12345678
-        } else {
-            acc
-        }
+        if acc == 0 { 0x12345678 } else { acc }
     };
     let predictor = (xorshift32(&mut rng) as i32) % 4096 - 2048;
     let step_index = (xorshift32(&mut rng) as i32) % 100 - 5;

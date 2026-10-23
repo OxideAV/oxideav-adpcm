@@ -60,7 +60,8 @@ fuzz_target!(|data: &[u8]| {
             };
             channels
         ];
-        if let Ok(blk) = encoder::ima_encode_block_reference(&pcm, channels, block_size, &mut states)
+        if let Ok(blk) =
+            encoder::ima_encode_block_reference(&pcm, channels, block_size, &mut states)
         {
             // The reference stream must always parse back.
             let decoded = ima_wav::decode_block(&blk, channels).expect("reference 4-bit decode");

@@ -39,15 +39,11 @@ fn seed_state(seed_bytes: &[u8]) -> (i32, i32) {
         for (i, &b) in seed_bytes.iter().take(4).enumerate() {
             acc |= (b as u32) << (i * 8);
         }
-        if acc == 0 {
-            0x12345678
-        } else {
-            acc
-        }
+        if acc == 0 { 0x12345678 } else { acc }
     };
     let predictor = (xorshift32(&mut rng) as i32) % 4096 - 2048;
     let step_index = (xorshift32(&mut rng) as i32) % 100 - 5; // intentionally
-                                                              // includes out-of-range values so the clamp paths fire.
+    // includes out-of-range values so the clamp paths fire.
     (predictor, step_index)
 }
 

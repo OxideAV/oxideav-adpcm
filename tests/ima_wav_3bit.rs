@@ -2,8 +2,8 @@
 //! round-trip, framing, registry-option, and robustness coverage.
 
 use oxideav_adpcm::encoder::ima_encode_block_3bit;
-use oxideav_adpcm::ima_wav::{decode_block_3bit, GROUP_BYTES_3BIT, GROUP_SAMPLES_3BIT};
-use oxideav_adpcm::{register_codecs, CODEC_ID_IMA_WAV};
+use oxideav_adpcm::ima_wav::{GROUP_BYTES_3BIT, GROUP_SAMPLES_3BIT, decode_block_3bit};
+use oxideav_adpcm::{CODEC_ID_IMA_WAV, register_codecs};
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
 fn sine_pcm(n: usize, hz: f64, sample_rate: f64, amp: f64) -> Vec<i16> {
@@ -134,7 +134,9 @@ fn registry_decoder_honours_bits_per_sample_3_option() {
     assert_eq!(af.samples as usize, samples_per_block);
     // Reconstruct i16 and sanity-check the error against the input.
     let decoded: Vec<i16> = af.data[0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
     let rms = rms_error(&decoded, &pcm);

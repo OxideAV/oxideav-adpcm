@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use oxideav_adpcm::{
-    dialogic, register_codecs, CODEC_ID_DIALOGIC, CODEC_ID_G726, CODEC_ID_IMA_WAV, CODEC_ID_MS,
-    CODEC_ID_YAMAHA,
+    CODEC_ID_DIALOGIC, CODEC_ID_G726, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA, dialogic,
+    register_codecs,
 };
 use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, CodecTag, Error, Frame, Packet, ProbeContext, TimeBase,
@@ -128,7 +128,9 @@ fn ensure_pcm_of(src: &Path, rate: u32, channels: u16) -> Option<PathBuf> {
 fn load_pcm(path: &Path) -> Vec<i16> {
     fs::read(path)
         .unwrap()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -146,11 +148,7 @@ fn xcorr(a: &[i16], b: &[i16]) -> f64 {
         db += bi * bi;
     }
     let denom = (da * db).sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        num / denom
-    }
+    if denom == 0.0 { 0.0 } else { num / denom }
 }
 
 // ---------------------------------------------------------------------------
@@ -262,7 +260,7 @@ fn decode_demuxer_style(reg: &CodecRegistry, params: &CodecParameters, wav: &Wav
             .unwrap();
         match dec.receive_frame() {
             Ok(Frame::Audio(af)) => {
-                for c in af.data[0].chunks_exact(2) {
+                for c in af.data[0].as_chunks::<2>().0 {
                     pcm.push(i16::from_le_bytes([c[0], c[1]]));
                 }
             }

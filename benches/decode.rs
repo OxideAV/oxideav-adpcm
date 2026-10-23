@@ -27,7 +27,7 @@
 //!
 //!     cargo bench -p oxideav-adpcm --bench decode
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use oxideav_adpcm::{
     dialogic, encoder as adpcm_encoder, g726, ima_qt, ima_wav, ms, yamaha, yamaha_a,
@@ -256,7 +256,7 @@ fn bench_decode_ima_qt_mono_500ms(c: &mut Criterion) {
             b.iter(|| {
                 let src = criterion::black_box(&encoded);
                 let mut acc: i64 = 0;
-                for chunk in src.chunks_exact(ima_qt::QT_BLOCK_SIZE) {
+                for chunk in src.as_chunks::<{ ima_qt::QT_BLOCK_SIZE }>().0 {
                     let pcm = ima_qt::decode_block(chunk, 1).expect("decode_block");
                     for s in pcm {
                         acc = acc.wrapping_add(s as i64);

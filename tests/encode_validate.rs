@@ -31,7 +31,7 @@ use oxideav_adpcm::encoder::{
     ima_qt_encode_block, ima_qt_encode_block_reference,
 };
 use oxideav_adpcm::ima_wav::ImaCodecState;
-use oxideav_adpcm::{ima_qt, Variant};
+use oxideav_adpcm::{Variant, ima_qt};
 
 fn fixtures_dir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -119,11 +119,7 @@ fn xcorr(a: &[i16], b: &[i16]) -> f64 {
         db += bi * bi;
     }
     let denom = (da * db).sqrt();
-    if denom == 0.0 {
-        0.0
-    } else {
-        num / denom
-    }
+    if denom == 0.0 { 0.0 } else { num / denom }
 }
 
 /// Little-endian helpers for the RIFF writer.
@@ -255,7 +251,9 @@ fn validator_decode_file(in_path: &std::path::Path, tag_label: &str) -> Option<V
     }
     let raw = fs::read(&out_path).ok()?;
     Some(
-        raw.chunks_exact(2)
+        raw.as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect(),
     )

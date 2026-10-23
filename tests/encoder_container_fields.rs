@@ -10,8 +10,8 @@
 //! stream exactly as the per-block reference does.
 
 use oxideav_adpcm::{
-    ima_wav, ms, register_codecs, CODEC_ID_DIALOGIC, CODEC_ID_G726, CODEC_ID_IMA_QT,
-    CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
+    CODEC_ID_DIALOGIC, CODEC_ID_G726, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
+    CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A, ima_wav, ms, register_codecs,
 };
 use oxideav_core::{
     AudioFrame, CodecId, CodecParameters, CodecRegistry, CodecTag, Frame, Packet, TimeBase,
@@ -235,7 +235,9 @@ fn decoder_built_from_encoder_output_params_splits_blocks() {
             panic!("expected audio frame");
         };
         let got: Vec<i16> = af.data[0]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect();
         assert_eq!(

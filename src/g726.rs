@@ -261,7 +261,7 @@ fn wav_check(rate: Rate, channels: usize) -> Result<()> {
 pub fn wav_pack_codes(codes: &[u8], rate: Rate, channels: u16) -> Result<Vec<u8>> {
     wav_check(rate, channels as usize)?;
     let group = 8 * channels as usize;
-    if codes.len() % group != 0 {
+    if !codes.len().is_multiple_of(group) {
         return Err(Error::invalid(format!(
             "g726 wav framing: {} codes is not a whole number of sub-blocks \
              ({group} codes each at {channels} channel(s))",
@@ -282,7 +282,7 @@ pub fn wav_pack_codes(codes: &[u8], rate: Rate, channels: u16) -> Result<Vec<u8>
 pub fn wav_unpack_codes(data: &[u8], rate: Rate, channels: u16) -> Result<Vec<u8>> {
     wav_check(rate, channels as usize)?;
     let sub = wav_subblock_bytes(rate, channels);
-    if data.len() % sub != 0 {
+    if !data.len().is_multiple_of(sub) {
         return Err(Error::invalid(format!(
             "g726 wav framing: {} bytes is not a whole number of {sub}-byte sub-blocks",
             data.len()
@@ -389,7 +389,7 @@ pub fn wav_encode_packet(pcm: &[i16], states: &mut [State]) -> Result<Vec<u8>> {
     // Validate the framing *before* running any sample through the
     // codec — a partial sub-block must not advance the channel states.
     wav_check(rate, channels)?;
-    if pcm.len() % (8 * channels) != 0 {
+    if !pcm.len().is_multiple_of(8 * channels) {
         return Err(Error::invalid(format!(
             "g726 wav framing: {} samples is not a whole number of sub-blocks \
              ({} samples each at {channels} channel(s))",
@@ -482,11 +482,7 @@ fn quan(rate: Rate, ds: u32, dln: u32) -> u32 {
 
 /// Exponent convention of LOG (§4.2.2): `floor(log2(x))`, 0 for x <= 1.
 fn exp_log(x: u32) -> u32 {
-    if x < 2 {
-        0
-    } else {
-        31 - x.leading_zeros()
-    }
+    if x < 2 { 0 } else { 31 - x.leading_zeros() }
 }
 
 /// Exponent convention of FLOATA / FLOATB / FMULT (§4.2.6): the bit
@@ -637,11 +633,7 @@ fn filtc(ax: u32, ap: u32) -> u32 {
 
 /// LIMA (§4.2.5): limit the speed-control parameter to [0, 1].
 fn lima(ap: u32) -> u32 {
-    if ap >= 256 {
-        64
-    } else {
-        ap >> 2
-    }
+    if ap >= 256 { 64 } else { ap >> 2 }
 }
 
 /// FMULT (§4.2.6): multiply a 16-bit TC predictor coefficient with an
@@ -748,11 +740,7 @@ fn upa2(pk0: u32, pk1: u32, pk2: u32, a1: u32, a2: u32, sigpk: u32) -> u32 {
     let uga2a = if pks2 == 0 { 16384 } else { 114688 };
     let fa1 = if a1 >> 15 == 0 {
         // f(a1) limited at +1/2.
-        if a1 <= 8191 {
-            a1 << 2
-        } else {
-            8191 << 2
-        }
+        if a1 <= 8191 { a1 << 2 } else { 8191 << 2 }
     } else {
         // f(a1) limited at -1/2.
         if a1 >= 57345 {
@@ -844,11 +832,7 @@ fn upb(rate: Rate, un: u32, bn: u32, dq: u32) -> u32 {
 
 /// TONE (§4.2.7): partial-band (tone) detection from the `a2` pole.
 fn tone(a2p: u32) -> u32 {
-    if (32768..53760).contains(&a2p) {
-        1
-    } else {
-        0
-    }
+    if (32768..53760).contains(&a2p) { 1 } else { 0 }
 }
 
 /// TRANS (§4.2.7): transition detection — a large `DQ` while a tone is
@@ -861,11 +845,7 @@ fn trans(td: u32, yl: u32, dq: u32) -> u32 {
     // 16-bit signed-magnitude DQ ⇒ the YLINT > 9 cap (Table 6 note b).
     let thr2 = if ylint > 9 { 31 << 10 } else { thr1 };
     let dqthr = (thr2 + (thr2 >> 1)) >> 1;
-    if dqmag > dqthr && td == 1 {
-        1
-    } else {
-        0
-    }
+    if dqmag > dqthr && td == 1 { 1 } else { 0 }
 }
 
 // ---------------------------------------------------------------------------
@@ -970,11 +950,7 @@ pub fn expand(s: u8, law: Law) -> u32 {
             (ss >> 12, (ss & 4095) << 1)
         }
     };
-    if sss == 0 {
-        ssq
-    } else {
-        (16384 - ssq) & 16383
-    }
+    if sss == 0 { ssq } else { (16384 - ssq) & 16383 }
 }
 
 /// COMPRESS (§4.2.8, decoder only): 16-bit two's-complement
@@ -1245,7 +1221,7 @@ impl State {
         // Speed control tail (§4.2.5): SUBTC needs Y and TDP.
         let app = filtc(subtc(dmsp, dmlp, tdp, y), self.ap);
         let apr = if tr == 1 { 256 } else { app }; // TRIGA
-                                                   // TRIGB + DELAY: advance every delayed variable at once.
+        // TRIGB + DELAY: advance every delayed variable at once.
         if tr == 1 {
             self.a1 = 0;
             self.a2 = 0;

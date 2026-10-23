@@ -110,7 +110,9 @@ fn build_g726_wav(bits: u16, payload: &[u8]) -> Vec<u8> {
 fn read_pcm_s16le(path: &PathBuf) -> Vec<i16> {
     let bytes = fs::read(path).expect("read pcm");
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect()
 }
@@ -149,7 +151,7 @@ fn decode_payload(bits: u16, payload: &[u8]) -> Vec<i16> {
         .expect("send_packet");
     let mut out = Vec::new();
     if let Ok(Frame::Audio(af)) = dec.receive_frame() {
-        for pair in af.data[0].chunks_exact(2) {
+        for pair in af.data[0].as_chunks::<2>().0 {
             out.push(i16::from_le_bytes([pair[0], pair[1]]));
         }
     }

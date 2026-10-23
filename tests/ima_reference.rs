@@ -25,7 +25,7 @@ use oxideav_adpcm::encoder::{
     ima_encode_block_3bit_reference, ima_encode_block_reference, ima_qt_encode_block_reference,
 };
 use oxideav_adpcm::ima_wav::{
-    ima_expand_code3, ima_expand_nibble, ima_quantize_code3, ima_quantize_nibble, ImaCodecState,
+    ImaCodecState, ima_expand_code3, ima_expand_nibble, ima_quantize_code3, ima_quantize_nibble,
 };
 use oxideav_adpcm::tables::IMA_STEP_SIZE;
 
@@ -228,7 +228,9 @@ fn step_table_matches_the_recommendation_listing() {
     assert_eq!(IMA_STEP_SIZE[88], 32767);
     assert_eq!(
         &IMA_STEP_SIZE[80..],
-        &[15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767]
+        &[
+            15289, 16818, 18500, 20350, 22385, 24623, 27086, 29794, 32767
+        ]
     );
 }
 

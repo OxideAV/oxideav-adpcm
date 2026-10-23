@@ -156,7 +156,7 @@ fn verona_adpcm_ms_audio_track_decodes() {
             };
             let bytes = &af.data[0];
             total_samples += bytes.len() / 2;
-            for c in bytes.chunks_exact(2) {
+            for c in bytes.as_chunks::<2>().0 {
                 let s = i16::from_le_bytes([c[0], c[1]]);
                 if s != 0 {
                     nonzero_samples += 1;

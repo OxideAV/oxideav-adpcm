@@ -1,8 +1,8 @@
 [package]
 name = "oxideav-adpcm"
 version = "0.0.7"
-edition = "2021"
-rust-version = "1.80"
+edition = "2024"
+rust-version = "1.95"
 license = "MIT"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust ADPCM audio decoders + encoders (Microsoft, IMA WAV/QuickTime, Yamaha A/B, OKI/Dialogic VOX) for oxideav"

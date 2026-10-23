@@ -14,7 +14,7 @@
 //! 256-sample block so the per-block SNR statistics are stable; the
 //! schedule shape and state-carriage semantics are the same.
 
-use oxideav_adpcm::g726::{compress_i16, expand_i16, Law, Rate, State};
+use oxideav_adpcm::g726::{Law, Rate, State, compress_i16, expand_i16};
 
 /// The documented demo rate cycle: rises to 40 kbit/s then descends
 /// back through 32 to 24 before wrapping — six entries, not a rotation

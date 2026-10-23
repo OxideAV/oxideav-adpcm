@@ -35,7 +35,9 @@ fn fixture16(name: &str) -> Vec<u16> {
     p.push(name);
     let raw = fs::read(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()));
     assert_eq!(raw.len() % 2, 0, "{name}: odd byte count");
-    raw.chunks_exact(2)
+    raw.as_chunks::<2>()
+        .0
+        .iter()
         .map(|w| u16::from_le_bytes([w[0], w[1]]))
         .collect()
 }

@@ -15,8 +15,9 @@
 //! decode of the same bytes.
 
 use oxideav_adpcm::{
+    CODEC_ID_DIALOGIC,
     dialogic::{self, Channel, NibbleOrder, Output},
-    register_codecs, CODEC_ID_DIALOGIC,
+    register_codecs,
 };
 use oxideav_core::{
     CodecId, CodecParameters, CodecRegistry, CodecTag, Frame, Packet, ProbeContext, TimeBase,
@@ -82,7 +83,9 @@ fn oki_wav_body_decodes_identically_to_typed_vox_path() {
     };
 
     let decoded: Vec<i16> = af.data[0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect();
 
@@ -183,7 +186,9 @@ fn oki_registry_decode_is_independent_of_wpole_extradata() {
             panic!("expected audio frame");
         };
         af.data[0]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect()
     };

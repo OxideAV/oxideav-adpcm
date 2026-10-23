@@ -32,9 +32,9 @@
 //! glue path is on the no-panic contract as well.
 
 use oxideav_adpcm::{
-    decoder, dialogic, g726, ima_qt, ima_wav, ms, register_codecs, yamaha, yamaha_a,
     CODEC_ID_DIALOGIC, CODEC_ID_G726, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
-    CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
+    CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A, decoder, dialogic, g726, ima_qt, ima_wav, ms,
+    register_codecs, yamaha, yamaha_a,
 };
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Packet, TimeBase};
 
@@ -96,7 +96,7 @@ fn ms_valid_predictor_index_emits_spec_sample_count() {
             block.extend_from_slice(&16i16.to_le_bytes());
             block.extend_from_slice(&0i16.to_le_bytes());
             block.extend_from_slice(&0i16.to_le_bytes());
-            block.extend(std::iter::repeat(0u8).take(body_bytes));
+            block.extend(std::iter::repeat_n(0u8, body_bytes));
             let pcm = ms::decode_block(&block, 1).unwrap();
             // 2 prelude samples + 2 nibbles per body byte.
             assert_eq!(
@@ -176,7 +176,7 @@ fn ima_wav_in_range_step_index_emits_spec_sample_count() {
             block.extend_from_slice(&0i16.to_le_bytes());
             block.push(idx);
             block.push(0);
-            block.extend(std::iter::repeat(0u8).take(groups * 4));
+            block.extend(std::iter::repeat_n(0u8, groups * 4));
             let pcm = ima_wav::decode_block(&block, 1).unwrap();
             assert_eq!(
                 pcm.len(),
@@ -192,13 +192,13 @@ fn ima_wav_in_range_step_index_emits_spec_sample_count() {
 #[test]
 fn ima_wav_misaligned_body_is_rejected() {
     let header_size = 4; // mono.
-                         // body length 1..=3 are all misaligned (must be multiple of 4).
+    // body length 1..=3 are all misaligned (must be multiple of 4).
     for body in 1usize..=3 {
         let mut block = Vec::with_capacity(header_size + body);
         block.extend_from_slice(&0i16.to_le_bytes());
         block.push(0);
         block.push(0);
-        block.extend(std::iter::repeat(0u8).take(body));
+        block.extend(std::iter::repeat_n(0u8, body));
         assert!(
             ima_wav::decode_block(&block, 1).is_err(),
             "mono body {body} bytes should be rejected"
@@ -829,7 +829,7 @@ fn g726_registry_path_random_packets_match_one_shot_decode() {
             dec.send_packet(&Packet::new(0, tb, payload[off..end].to_vec()))
                 .expect("send_packet never fails on G.726 bytes");
             if let Ok(oxideav_core::Frame::Audio(af)) = dec.receive_frame() {
-                for pair in af.data[0].chunks_exact(2) {
+                for pair in af.data[0].as_chunks::<2>().0 {
                     got.push(i16::from_le_bytes([pair[0], pair[1]]));
                 }
             }
@@ -893,7 +893,7 @@ fn g726_wav_framing_registry_random_packets_match_reference() {
                     dec.send_packet(&Packet::new(0, tb, payload[off..end].to_vec()))
                         .expect("wav framing rejects no byte pattern");
                     if let Ok(oxideav_core::Frame::Audio(af)) = dec.receive_frame() {
-                        for pair in af.data[0].chunks_exact(2) {
+                        for pair in af.data[0].as_chunks::<2>().0 {
                             got.push(i16::from_le_bytes([pair[0], pair[1]]));
                         }
                     }

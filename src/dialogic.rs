@@ -559,12 +559,16 @@ mod tests {
         assert_eq!(RESET_PREAMBLE_BYTES, 24);
         assert_eq!(RESET_PREAMBLE_SAMPLES, 48);
         // §5 byte values: 0x80 for hi-first, 0x08 for lo-first.
-        assert!(reset_preamble(NibbleOrder::HiFirst)
-            .iter()
-            .all(|&b| b == 0x80));
-        assert!(reset_preamble(NibbleOrder::LoFirst)
-            .iter()
-            .all(|&b| b == 0x08));
+        assert!(
+            reset_preamble(NibbleOrder::HiFirst)
+                .iter()
+                .all(|&b| b == 0x80)
+        );
+        assert!(
+            reset_preamble(NibbleOrder::LoFirst)
+                .iter()
+                .all(|&b| b == 0x08)
+        );
     }
 
     #[test]

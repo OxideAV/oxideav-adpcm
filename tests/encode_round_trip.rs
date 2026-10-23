@@ -10,8 +10,8 @@
 //! the source.
 
 use oxideav_adpcm::{
-    register_codecs, CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
-    CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
+    CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA,
+    CODEC_ID_YAMAHA_A, register_codecs,
 };
 use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
@@ -117,7 +117,7 @@ fn round_trip_opts(
         let Frame::Audio(af) = dec.receive_frame().unwrap() else {
             panic!("expected audio frame");
         };
-        for c in af.data[0].chunks_exact(2) {
+        for c in af.data[0].as_chunks::<2>().0 {
             decoded.push(i16::from_le_bytes([c[0], c[1]]));
         }
     }

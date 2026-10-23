@@ -469,8 +469,8 @@ fn dialogic_encode_packet_multi_extreme_state_seed_never_panics() {
 #[test]
 fn registry_encoder_never_panics_on_zero_length_pcm() {
     use oxideav_adpcm::{
-        register_codecs, CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
-        CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
+        CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA,
+        CODEC_ID_YAMAHA_A, register_codecs,
     };
     use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame};
     let mut reg = CodecRegistry::new();
@@ -502,8 +502,8 @@ fn registry_encoder_never_panics_on_zero_length_pcm() {
 #[test]
 fn registry_encoder_handles_random_pcm_bytes_without_panic() {
     use oxideav_adpcm::{
-        register_codecs, CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS,
-        CODEC_ID_YAMAHA, CODEC_ID_YAMAHA_A,
+        CODEC_ID_DIALOGIC, CODEC_ID_IMA_QT, CODEC_ID_IMA_WAV, CODEC_ID_MS, CODEC_ID_YAMAHA,
+        CODEC_ID_YAMAHA_A, register_codecs,
     };
     use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame};
     let mut rng = Lcg::new(0x00E3_0009u64);
@@ -738,7 +738,7 @@ fn g726_encoder_dc_extremes_converge_without_overflow() {
 /// once flush pads the ragged tail with silence.
 #[test]
 fn g726_wav_framing_registry_encoder_random_frames_match_direct() {
-    use oxideav_adpcm::{g726, CODEC_ID_G726};
+    use oxideav_adpcm::{CODEC_ID_G726, g726};
     use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame};
     let mut rng = Lcg::new(0x00FA_0730u64);
     let mut reg = CodecRegistry::new();
@@ -806,7 +806,7 @@ fn g726_wav_framing_registry_encoder_random_frames_match_direct() {
 /// `send_frame` calls), and its flush emits the zero-padded tail.
 #[test]
 fn g726_registry_encoder_matches_direct_api_across_random_frames() {
-    use oxideav_adpcm::{g726, CODEC_ID_G726};
+    use oxideav_adpcm::{CODEC_ID_G726, g726};
     use oxideav_core::{AudioFrame, CodecId, CodecParameters, CodecRegistry, Frame};
     let mut rng = Lcg::new(0x00FA_0727u64);
     let mut reg = CodecRegistry::new();

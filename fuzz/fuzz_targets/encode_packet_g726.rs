@@ -17,8 +17,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_adpcm::g726::{
-    decode_packet, encode_packet, wav_decode_packet, wav_encode_packet, wav_subblock_bytes,
-    BitOrder, BitPacker, BitUnpacker, Rate, State,
+    BitOrder, BitPacker, BitUnpacker, Rate, State, decode_packet, encode_packet, wav_decode_packet,
+    wav_encode_packet, wav_subblock_bytes,
 };
 
 fuzz_target!(|data: &[u8]| {

@@ -16,7 +16,7 @@
 //!
 //! Self-contained: no fixtures, no external binaries.
 
-use oxideav_adpcm::{ms, register_codecs, CODEC_ID_MS};
+use oxideav_adpcm::{CODEC_ID_MS, ms, register_codecs};
 use oxideav_core::{CodecId, CodecParameters, CodecRegistry, Frame, Packet, TimeBase};
 
 /// Build a `WAVEFORMATEX` trailer (the bytes following the 16/18-byte base)
@@ -64,7 +64,9 @@ fn decode_via_registry(extradata: Vec<u8>, block: Vec<u8>) -> oxideav_core::Resu
         panic!("expected audio frame");
     };
     Ok(af.data[0]
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| i16::from_le_bytes([c[0], c[1]]))
         .collect())
 }

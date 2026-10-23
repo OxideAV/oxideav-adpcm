@@ -39,7 +39,7 @@
 //! `conformance/` directory) and skip cleanly when it is unset or the
 //! files are absent.
 
-use oxideav_adpcm::g726::{compress_i16, expand_i16, Law, Rate, State};
+use oxideav_adpcm::g726::{Law, Rate, State, compress_i16, expand_i16};
 use std::path::{Path, PathBuf};
 
 /// The recovered demo schedule: rises to 40 kbit/s then descends back
@@ -74,7 +74,9 @@ fn read_words(dir: &Path, name: &str) -> Option<Vec<u16>> {
     assert_eq!(bytes.len() % 2, 0, "{name}: odd byte length");
     Some(
         bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect(),
     )
