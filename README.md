@@ -87,6 +87,15 @@ encoders (override via `set_block_size`); IMA-QT uses the spec-mandated
   per-channel blocks in the packet, with no new framing. `Variant::ImaQt`
   now reports `max_channels() == Some(8)` (was 2);
   `ima_qt::QT_MAX_CHANNELS` is exposed as the cap.
+- **IMA-QT stream continuity** — a block's preamble carries only the
+  top 9 predictor bits, so the stream decoder keeps each channel's
+  full-precision predictor while the next preamble agrees with it (equal
+  step index, preamble predictor within 127 of the running one) and
+  reseeds otherwise; the encoders track the same state, so their
+  reconstruction matches the decoder block after block. Sample-exact
+  with macOS AudioToolbox on `afconvert`- and `ffmpeg`-encoded `ima4`
+  and on crafted agree / disagree probe streams.
+  `ima_qt::decode_block` keeps the per-block reseed for standalone use.
 - **IMA-WAV 4-bit multichannel encode** — the 4-bit IMA-WAV decoder,
   `ima_encode_block` and the encoder factory all support 1..=8 channels
   (the body interleaves channels in 4-byte groups). The frame-based

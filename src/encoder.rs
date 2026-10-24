@@ -1257,7 +1257,61 @@ pub const QT_SAMPLES_PER_BLOCK: usize = 64;
 /// reconstructed first decoded sample will differ from the input by up to
 /// 64 LSB. This is inherent to the QT block format and not a property of the
 /// search loop.
+///
+/// Every block is encoded as if the decoder reseeds from its preamble,
+/// which is what [`crate::ima_qt::decode_block`] does. A stream decoder
+/// (the registry decoder, like macOS's) instead keeps a channel's
+/// full-precision predictor when the preamble agrees with its running
+/// state; [`ima_qt_encode_block_continuous`] tracks that state so the
+/// encoder's reconstruction matches such a decoder block after block.
 pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> {
+    ima_qt_encode_block_search(samples, channels, None)
+}
+
+/// [`ima_qt_encode_block`] for a stream: `states` holds one
+/// [`ima_wav::ImaCodecState`] per channel (start from `Default`) and
+/// carries the decoder's running predictor / step index from block to
+/// block. When a block's preamble agrees with that state (the same step
+/// index, a preamble predictor within 127 of the running one) the
+/// nibbles are chosen from
+/// the full-precision running predictor, exactly as
+/// [`crate::ima_qt::decode_block_continuous`] will decode them.
+pub fn ima_qt_encode_block_continuous(
+    samples: &[i16],
+    channels: usize,
+    states: &mut [ima_wav::ImaCodecState],
+) -> Result<Vec<u8>> {
+    if states.len() != channels {
+        return Err(Error::invalid(format!(
+            "adpcm_ima_qt encoder: {} states for {channels} channels",
+            states.len()
+        )));
+    }
+    ima_qt_encode_block_search(samples, channels, Some(states))
+}
+
+/// The decoder's predictor for a QT block: the carried full-precision
+/// predictor when the preamble agrees with the carried state, the
+/// preamble seed otherwise (mirrors `ima_qt::decode_block_continuous`).
+fn qt_block_start_predictor(
+    carried: &ima_wav::ImaCodecState,
+    predictor_seed: i32,
+    step_index: i32,
+) -> i32 {
+    if carried.step_index == step_index
+        && crate::ima_qt::preamble_agrees(carried.predictor, predictor_seed)
+    {
+        carried.predictor
+    } else {
+        predictor_seed
+    }
+}
+
+fn ima_qt_encode_block_search(
+    samples: &[i16],
+    channels: usize,
+    mut states: Option<&mut [ima_wav::ImaCodecState]>,
+) -> Result<Vec<u8>> {
     if channels == 0 || channels > crate::ima_qt::QT_MAX_CHANNELS {
         return Err(Error::unsupported(format!(
             "adpcm_ima_qt encoder: channel count {channels} not supported (1..={})",
@@ -1327,8 +1381,12 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
         out[block_off] = (preamble >> 8) as u8;
         out[block_off + 1] = (preamble & 0xFF) as u8;
 
+        let start = match states.as_deref() {
+            Some(carried) => qt_block_start_predictor(&carried[ch], predictor_seed, step_index),
+            None => predictor_seed,
+        };
         let mut st = ImaState {
-            predictor: predictor_seed,
+            predictor: start,
             step_index,
         };
         for i in 0..32 {
@@ -1341,6 +1399,12 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
             let (n_hi, st_after_hi) = ima_best_nibble(&st, t_hi);
             st = st_after_hi;
             out[block_off + 2 + i] = (n_hi << 4) | n_lo;
+        }
+        if let Some(carried) = states.as_deref_mut() {
+            carried[ch] = ima_wav::ImaCodecState {
+                predictor: st.predictor,
+                step_index: st.step_index,
+            };
         }
     }
     Ok(out)
@@ -1359,7 +1423,10 @@ pub fn ima_qt_encode_block(samples: &[i16], channels: usize) -> Result<Vec<u8>> 
 /// quantised to the top 9 bits — the only seed the QT preamble can
 /// carry — and all 64 samples are quantized by the §6.1 ladder with no
 /// heuristic seeding, so the byte stream is fully determined by the
-/// input.
+/// input. When that preamble agrees with the carried state (the same
+/// index, a seed within 127 of the carried predictor) the ladder runs
+/// from the carried full-precision predictor instead, matching a stream
+/// decoder ([`crate::ima_qt::decode_block_continuous`]).
 pub fn ima_qt_encode_block_reference(
     samples: &[i16],
     channels: usize,
@@ -1389,8 +1456,10 @@ pub fn ima_qt_encode_block_reference(
     for (ch, st) in states.iter_mut().enumerate() {
         let block_off = ch * QT_BLOCK_BYTES_PER_CHANNEL;
         let predictor_seed = (samples[ch] as i32) & !0x7F;
-        st.predictor = predictor_seed;
         st.step_index = st.step_index.clamp(0, 88);
+        // A preamble that agrees with the carried state makes a stream
+        // decoder keep its full-precision predictor; quantize from it.
+        st.predictor = qt_block_start_predictor(st, predictor_seed, st.step_index);
 
         let preamble: u16 = (predictor_seed as u16 & 0xFF80) | (st.step_index as u16 & 0x7F);
         out[block_off] = (preamble >> 8) as u8;
@@ -1415,8 +1484,9 @@ pub struct ImaQtEncoder {
     output_params: CodecParameters,
     channels: usize,
     quantizer: Quantizer,
-    /// Per-channel codec state for [`Quantizer::Reference`] — the step
-    /// index carries across blocks; unused under [`Quantizer::Search`].
+    /// Per-channel decoder state carried across blocks (both
+    /// quantizers): the step index and, while a block's preamble agrees
+    /// with it, the full-precision predictor.
     ref_states: Vec<ima_wav::ImaCodecState>,
     pcm: Vec<i16>,
     pending: VecDeque<Packet>,
@@ -1433,7 +1503,9 @@ impl ImaQtEncoder {
     }
     fn encode_one_block(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
         match self.quantizer {
-            Quantizer::Search => ima_qt_encode_block(samples, self.channels),
+            Quantizer::Search => {
+                ima_qt_encode_block_continuous(samples, self.channels, &mut self.ref_states)
+            }
             Quantizer::Reference => {
                 ima_qt_encode_block_reference(samples, self.channels, &mut self.ref_states)
             }

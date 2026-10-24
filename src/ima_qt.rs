@@ -44,6 +44,19 @@ pub struct QtChannel {
     valid: bool,
 }
 
+/// Whether a block's preamble predictor `seed` (top 9 bits, low 7 bits
+/// zero) agrees with a channel's running `predictor`: the two lie less
+/// than one preamble quantum (128) apart, so the preamble is the running
+/// predictor truncated *or* rounded up to 9 bits. Black-box behaviour of
+/// macOS's IMA4 decoder: it keeps its running predictor for seeds
+/// `predictor - 127 ..= predictor + 127` (with an equal step index) and
+/// reseeds for anything farther, including a seed exactly 128 above a
+/// predictor whose low 7 bits are zero.
+#[doc(hidden)]
+pub fn preamble_agrees(predictor: i32, seed: i32) -> bool {
+    (predictor - seed).abs() < 128
+}
+
 /// Decode `channels` contiguous 34-byte QT-IMA blocks into interleaved i16.
 ///
 /// Returns `64 * channels` i16 samples (one packet of QT-IMA = 64 samples
@@ -57,10 +70,10 @@ pub fn decode_block(data: &[u8], channels: usize) -> Result<Vec<i16>> {
 
 /// [`decode_block`] for a stream: each channel keeps its full-precision
 /// predictor from the previous block while the block's preamble agrees
-/// with it (the same step index, and the same top 9 predictor bits).
-/// Only a preamble that disagrees (or the first block) reseeds the
-/// channel, as macOS's IMA4 decoder does. `state` holds one entry per
-/// channel.
+/// with it (the same step index, and a preamble predictor within 127 of
+/// the running one — see [`preamble_agrees`]). Only a preamble that
+/// disagrees (or the first block) reseeds the channel, as macOS's IMA4
+/// decoder does. `state` holds one entry per channel.
 pub fn decode_block_continuous(
     data: &[u8],
     channels: usize,
@@ -102,7 +115,10 @@ pub fn decode_block_continuous(
         let index_seed = ((preamble & 0x7F) as i32).min(88);
 
         let st = &mut state[ch];
-        if !st.valid || st.step_index != index_seed || st.predictor & !0x7F != predictor_seed {
+        if !st.valid
+            || st.step_index != index_seed
+            || !preamble_agrees(st.predictor, predictor_seed)
+        {
             *st = QtChannel {
                 predictor: predictor_seed,
                 step_index: index_seed,
@@ -166,6 +182,36 @@ mod tests {
         other[1] = (other[1] & 0x80) | ((idx as u8 + 1) & 0x7F);
         let reseeds = decode_block_continuous(&other, 1, &mut state2).unwrap();
         assert_eq!(reseeds, decode_block(&other, 1).unwrap());
+    }
+
+    /// Preamble agreement is a distance test, not a truncation match: a
+    /// seed rounded *up* to the next 9-bit value continues too, while a
+    /// seed 128 or more away reseeds (black-box macOS behaviour).
+    #[test]
+    fn preamble_agreement_window() {
+        assert!(preamble_agrees(3144, 3072)); // truncated
+        assert!(preamble_agrees(3144, 3200)); // rounded up
+        assert!(preamble_agrees(3200, 3200));
+        assert!(preamble_agrees(3073, 3200));
+        assert!(!preamble_agrees(3200, 3328)); // low bits 0, one quantum up
+        assert!(!preamble_agrees(3199, 3072 - 128));
+        assert!(preamble_agrees(-32768, -32768));
+        assert!(!preamble_agrees(-32768, -32640));
+
+        // Through the decoder: running state 64 / index 0 after block 1;
+        // a preamble seed of 128 (64 above) continues from 64.
+        let mut first = [0x11u8; QT_BLOCK_SIZE];
+        first[0] = 0;
+        first[1] = 0;
+        let mut state = [QtChannel::default()];
+        decode_block_continuous(&first, 1, &mut state).unwrap();
+        assert_eq!(state[0].predictor, 64);
+        let mut up = [0u8; QT_BLOCK_SIZE];
+        up[..2].copy_from_slice(&0x0080u16.to_be_bytes());
+        let continued = decode_block_continuous(&up, 1, &mut state).unwrap();
+        assert!(continued.iter().all(|&v| v == 64), "{:?}", &continued[..4]);
+        // A fresh channel seeds the same block at 128.
+        assert!(decode_block(&up, 1).unwrap().iter().all(|&v| v == 128));
     }
 
     #[test]

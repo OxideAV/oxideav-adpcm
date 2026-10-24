@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - edition 2024, MSRV 1.95.
+- adpcm_ima_qt decoder keeps a channel's full-precision predictor across
+  blocks whose preamble agrees with the running state (same step index,
+  preamble predictor within 127 of the running one — truncated *or*
+  rounded up), reseeding only on disagreement; bit-identical to macOS's
+  IMA4 decoder on afconvert / ffmpeg streams and crafted probe streams
+  (was ~23–35 dB SNR from the dropped low 7 bits). New
+  `ima_qt::decode_block_continuous`; `decode_block` still reseeds each
+  block (#8).
+- adpcm_ima_qt encoders (search and reference quantizers) quantize from
+  the carried full-precision predictor whenever the block preamble agrees
+  with it, so the stream decodes the way the encoder modelled it. New
+  `encoder::ima_qt_encode_block_continuous`.
 
 ## [0.0.7](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.6...v0.0.7) - 2026-08-20
 
