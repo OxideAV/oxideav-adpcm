@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the carried full-precision predictor whenever the block preamble agrees
   with it, so the stream decodes the way the encoder modelled it. New
   `encoder::ima_qt_encode_block_continuous`.
+- adpcm_ima_wav (4-bit) decodes a block whose header step index is
+  89..=255 with the index clamped to 88 instead of rejecting the block;
+  sample-exact with macOS AudioToolbox on random-header WAV files (#9).
+  The 3-bit path still rejects such a header (no black-box reference
+  decodes 3-bit IMA WAV).
 
 ## [0.0.7](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.6...v0.0.7) - 2026-08-20
 
