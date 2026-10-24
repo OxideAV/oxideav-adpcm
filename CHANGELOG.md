@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.8](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.7...v0.0.8) - 2026-10-24
+
+### Fixed
+
+- fixup for #9: CHANGELOG entry
+- fixup for #8: preamble agreement is a ±127 window; encoders track the stream state
+
+### Other
+
+- a header step index past 88 decodes as 88
+- keep a channel's running predictor across blocks whose preamble agrees
+- edition 2024, MSRV 1.95
+- clippy 1.98: drain_collect — take the pending PCM/buffer Vecs with mem::take instead of drain(..).collect()
+
 ### Changed
 
 - edition 2024, MSRV 1.95.
