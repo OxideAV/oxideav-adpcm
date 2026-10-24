@@ -150,18 +150,23 @@ fn ms_invalid_channel_count_is_rejected() {
 
 // ----- IMA-ADPCM WAV ------------------------------------------------
 
-/// IMA-WAV step index out of range (>= 89) is rejected; in-range is
-/// accepted.
+/// IMA-WAV step index out of range (>= 89) decodes as index 88.
 #[test]
-fn ima_wav_step_index_out_of_range_is_rejected() {
-    for bad_idx in 89u8..=255 {
+fn ima_wav_step_index_out_of_range_clamps_to_88() {
+    let block = |idx: u8| {
         let mut block = Vec::new();
-        block.extend_from_slice(&0i16.to_le_bytes());
-        block.push(bad_idx);
+        block.extend_from_slice(&1000i16.to_le_bytes());
+        block.push(idx);
         block.push(0);
-        assert!(
-            ima_wav::decode_block(&block, 1).is_err(),
-            "step index {bad_idx} should be rejected"
+        block.extend_from_slice(&[0x17, 0x8c, 0x3f, 0xa2]);
+        block
+    };
+    let last = ima_wav::decode_block(&block(88), 1).unwrap();
+    for bad_idx in 89u8..=255 {
+        assert_eq!(
+            ima_wav::decode_block(&block(bad_idx), 1).unwrap(),
+            last,
+            "step index {bad_idx} should decode as 88"
         );
     }
 }
