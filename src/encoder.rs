@@ -95,6 +95,7 @@ pub const DEFAULT_BLOCK_SIZE: usize = 256;
 ///   prescribes — so the byte stream matches what any other
 ///   spec-conforming reference compressor emits for the same input.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Quantizer {
     /// Decoder-loop search (best quality, crate-specific stream).
     #[default]

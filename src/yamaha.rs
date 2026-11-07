@@ -54,6 +54,7 @@ use crate::tables::{
 ///   rounding, `{57/64, 77/64, 102/64, 128/64, 153/64}` encoded as the
 ///   ×64 numerators ([`YAMAHA_INDEX_SCALE_OPNA`], update `>> 6`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Chip {
     /// AICA FQ8005 / Y8950 / YMZ280B constants (default).
     #[default]

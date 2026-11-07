@@ -52,6 +52,7 @@ pub mod g726;
 pub mod ima_qt;
 pub mod ima_wav;
 pub mod ms;
+#[doc(hidden)]
 pub mod tables;
 pub mod yamaha;
 pub mod yamaha_a;

@@ -54,6 +54,7 @@ use oxideav_core::{AudioFrame, CodecId, CodecParameters, Error, Frame, Packet, R
 /// - [`Variant::all`] — slice of every supported variant, suitable for
 ///   `for v in Variant::all() { … }` iteration.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Variant {
     Ms,
     ImaWav,

@@ -66,6 +66,7 @@ pub struct Channel {
 /// signed; downstream PCM containers want 16-bit signed. Mirrors the
 /// equivalent enum on [`crate::dialogic::Output`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Output {
     /// Return the raw 12-bit signed value (`-2048 ..= 2047`).
     Native12,
