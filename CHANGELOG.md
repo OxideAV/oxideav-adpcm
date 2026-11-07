@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/OxideAV/oxideav-adpcm/compare/v0.0.8...v0.0.9) - 2026-11-07
+
+### Other
+
+- API hygiene: #[non_exhaustive] on growable enums, hide internal tables module
+
 ### Changed
 
 - `#[non_exhaustive]` on the growable public enums `Variant`, `encoder::Quantizer`, `yamaha::Chip`, `dialogic::Output` and `yamaha_a::Output`. `Shape` (block vs. stream), `dialogic::NibbleOrder`, `g726::Rate` (the four G.726 rates), `g726::Law` and `g726::BitOrder` stay exhaustive: their value sets are fixed.
